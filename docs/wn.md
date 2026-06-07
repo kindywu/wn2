@@ -260,6 +260,176 @@ erDiagram
 
 ---
 
+## 贯穿示例：以 "bank"（银行）为主线
+
+下面用 **bank** 的一个具体义项 ——"银行，金融机构"—— 串起 26 张表之间的完整关系链路。
+
+### 起点：lexicon
+
+一切数据的容器是词库 `oewn:2025+`：
+
+```
+lexicons.rowid = 1, specifier = 'oewn:2025+', language = 'en'
+```
+
+### entry → form：词条与词形
+
+`bank` 作为一个名词词条存储于 `entries`，其首选词形（lemma）存储在 `forms`：
+
+| 表 | 字段 | 值 |
+|----|------|-----|
+| entries | id | `oewn-bank-n` |
+| entries | pos | `n` |
+| forms | form | `bank` |
+| forms | rank | `0`（首选词形/lemma） |
+
+`bank` 还有一个动词词条 `oewn-bank-v`（pos=`v`），同样通过 `forms.entry_rowid` 关联到词形 `bank`。
+
+### sense → synset → definition：义项、同义词集与定义
+
+名词 `bank` 有 10 个义项（senses），每个义项属于一个 synset。选取"银行"义项：
+
+| 表 | 字段 | 值 |
+|----|------|-----|
+| senses | id | `oewn-bank__1.14.00..` |
+| senses | entry_rank | `2`（该词条的第 2 个义项） |
+| senses | synset_rank | `1`（该 synset 中的排序位置） |
+| synsets | id | `oewn-08437235-n` |
+| definitions | definition | *a financial institution that accepts deposits and channels the money into lending activities* |
+
+同时，这个 synset 还包含另外 3 个词条的义项，组成同义词集：
+
+| synset_rank | form | entry_id |
+|-------------|------|----------|
+| 0 | depository financial institution | `oewn-depository_financial_institution-n` |
+| 1 | **bank** | `oewn-bank-n` |
+| 2 | banking concern | `oewn-banking_concern-n` |
+| 3 | banking company | `oewn-banking_company-n` |
+
+> 这展示了 **entry → sense → synset** 的多对多模式：一个 synset 通过多行 senses 聚合多个 entry，一个 entry 通过多行 senses 分散到多个 synset。
+
+### lexfile：语义域分类
+
+synset `oewn-08437235-n` 通过 `lexfile_rowid` 归入 `noun.group`（集合名词），表示"银行"在语义上属于一种机构/集合。45 个 lexfile 构成了 WordNet 的顶层语义分类。
+
+### ILI：跨语言索引
+
+synset 通过 `ili_rowid` 指向跨语言索引：
+
+| 表 | 字段 | 值 |
+|----|------|-----|
+| ilis | id | `i81364` |
+| ili_statuses | status | `presupposed`（已确认的稳定 ILI） |
+
+未来如果中文 WordNet 中有一个 synset 也指向 `i81364`，就能实现"bank ↔ 银行"的跨语言映射。
+
+### synset_relations：同义词集关系（层级结构）
+
+基于 `oewn-08437235-n`，通过 `synset_relations` 构建上下位层级：
+
+```
+synset_relations: source_rowid → target_rowid (via relation_types)
+```
+
+| 关系类型 | 目标 synset | 目标定义 |
+|----------|------------|---------|
+| **hypernym** (上位词) | `oewn-08071473-n` | an institution that collects funds and invests them in financial assets |
+| **holo_member** (整体-成员) | `oewn-08083327-n` | banks collectively |
+| **hyponym** (下位词) | `oewn-08251549-n` | credit union |
+| **hyponym** | `oewn-08435377-n` | a financial institution that accepts demand deposits and provides other services for the public |
+| **hyponym** | …还有 10+ 个下位词 | (Federal Reserve bank, commercial bank, etc.) |
+
+`relation_types` 表定义了 28 种关系类型，这三个关系使用了其中的 `hypernym`、`holo_member`、`hyponym`。
+
+### sense_relations：义项关系（细粒度语义）
+
+名词"银行"义项通过 `sense_relations` 派生了三个动词用法：
+
+| 关系类型 | 目标 sense | 目标词 | 含义 |
+|----------|-----------|--------|------|
+| **derivation** (派生) | `oewn-bank__2.40.02..` | bank (v) | do business with a bank |
+| **derivation** | `oewn-bank__2.40.01..` | bank (v) | be in the banking business |
+| **derivation** | `oewn-bank__2.40.00..` | bank (v) | put into a bank account |
+
+> `synset_relations` 连接 synset → synset（概念层级）；`sense_relations` 连接 sense → sense（具体词义间的关系），粒度更细。
+
+### synset_examples：例句
+
+每个 synset 可附带使用例句：
+
+| example | language |
+|---------|----------|
+| *he cashed a check at the bank* | (null=en) |
+| *that bank holds the mortgage on my home* | (null=en) |
+
+### syntactic_behaviours：句法行为（动词）
+
+动词 `bank` 的 8 个义项各自关联句法模式。通过 `syntactic_behaviour_senses`（sense → syntactic_behaviour 的关联表）：
+
+| sense_id | 句法框架 | sb_id |
+|----------|---------|-------|
+| bank 的存钱义项 | Somebody ----s something | `vtai` (及物-有灵主语-无灵宾语) |
+| bank 的开银行义项 | Somebody ----s | `via` (不及物-有灵主语) |
+| bank 的倾斜义项 | Somebody ----s something | `vtai` |
+
+### pronunciations：发音（补充示例）
+
+并非所有词都有发音数据。以 **give** 为例：
+
+| form | IPA | variety | phonemic |
+|------|-----|---------|----------|
+| give | ɡɪv | (null) | 0 |
+
+`pronunciations` 通过 `form_rowid` 关联到具体的词形，支持 US/GB 等多种变体。
+
+### adjpositions：形容词位置（补充示例）
+
+形容词通过 `adjpositions` 标记句法位置。以 **able** 为例：
+
+| form | adjposition |
+|------|-------------|
+| able | predicative |
+
+### 空表的位置
+
+`counts`、`entry_index`、`tags`、`sense_synset_relations`、`lexicon_dependencies`、`lexicon_extensions` 等表在当前数据库中为空，但它们是 WN-LMF 规范预留的结构，供扩展使用（词频统计、词形标签、跨词库依赖等）。
+
+### 完整关系链路图
+
+```
+lexicons (1) ──── oewn:2025+
+  │
+  ├── entries ──── oewn-bank-n (pos=n)
+  │     │
+  │     ├── forms ──── "bank" (rank=0) ──→ [pronunciations: IPA, 变体]
+  │     │
+  │     └── senses ──── oewn-bank__1.14.00.. (entry_rank=2, synset_rank=1)
+  │           │
+  │           ├── belongs_to → synsets ──── oewn-08437235-n (pos=n)
+  │           │     │
+  │           │     ├── lexfiles ──── noun.group
+  │           │     ├── ilis ──── i81364 (status: presupposed)
+  │           │     ├── definitions ──── "a financial institution that..."
+  │           │     ├── synset_examples ──── "he cashed a check at the bank"
+  │           │     ├── synset_relations ──→ hypernym → oewn-08071473-n
+  │           │     │                    ──→ hyponym → oewn-08251549-n
+  │           │     │                    ──→ holo_member → oewn-08083327-n
+  │           │     │                    ──→ [relation_types: 28 种类型]
+  │           │     │
+  │           │     └── other senses (同义词集其他成员)
+  │           │           └── depository financial institution / banking concern / banking company
+  │           │
+  │           ├── sense_relations ──→ derivation → bank (v) - "put into a bank account"
+  │           │                   ──→ derivation → bank (v) - "do business with a bank"
+  │           │
+  │           └── syntactic_behaviour_senses ──→ vtai "Somebody ----s something"
+  │                                           ──→ via  "Somebody ----s"
+  │
+  └── [其他表: counts, tags, entry_index, sense_synset_relations 等预留空表]
+```
+
+---
+
 ## 表结构详解
 
 ### 核心表
