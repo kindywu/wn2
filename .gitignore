@@ -10,7 +10,8 @@ wheels/
 .venv
 
 # Data
-data/
+data/*
+!data/README.md
 
 # Claude
 CLAUDE.md
