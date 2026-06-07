@@ -112,7 +112,8 @@ def sqlite_to_pg(sqlite_sql: str) -> str:
 
 
 def create_schema(pg_cur):
-    pg_cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+    pg_cur.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+    pg_cur.execute(f"CREATE SCHEMA {SCHEMA}")
 
 
 def create_tables(pg_cur, sqlite_tables):
@@ -120,10 +121,8 @@ def create_tables(pg_cur, sqlite_tables):
         if tname not in sqlite_tables:
             continue
         sql = sqlite_to_pg(sqlite_tables[tname])
-        # Set search_path so tables land in wn schema
         pg_cur.execute(f"SET search_path TO {SCHEMA}")
         pg_cur.execute(sql)
-        print(f"  created {SCHEMA}.{tname}")
 
 
 def copy_table(sq_cur, pg_cur, tname):
@@ -178,10 +177,7 @@ def copy_table(sq_cur, pg_cur, tname):
 def create_indexes(pg_cur, sqlite_indexes):
     for idx_sql in sqlite_indexes:
         pg_cur.execute(f"SET search_path TO {SCHEMA}")
-        try:
-            pg_cur.execute(idx_sql)
-        except Exception as e:
-            print(f"  SKIP index: {e}")
+        pg_cur.execute(idx_sql)
 
 
 def main():
