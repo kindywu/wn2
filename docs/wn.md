@@ -2,14 +2,13 @@
 
 ## 概述
 
-`wn.db` 是一个 SQLite 3.x 数据库，存储了 **Open English WordNet 2025+** 的完整词网数据。该数据库遵循 **WN-LMF**（WordNet Lexical Markup Framework）规范，通过 Python 库 `wn`（>=1.1.0）进行访问。
+`wn.db` 是一个 SQLite 3.x 数据库，存储了 **Open English WordNet 2025+** 和 **Chinese Open WordNet (omw-cmn 1.4)** 两个词库。该数据库遵循 **WN-LMF**（WordNet Lexical Markup Framework）规范，通过 Python 库 `wn`（>=1.1.0）进行访问。
 
-- **文件大小**: ~107 MB
-- **词库**: Open English WordNet (oewn:2025+)
-- **语言**: 英语 (en)
-- **许可证**: CC BY 4.0
+- **文件大小**: ~133 MB
+- **词库 1**: Open English WordNet (oewn:2025+) — 英语 (en), CC BY 4.0
+- **词库 2**: Chinese Open WordNet (omw-cmn:1.4) — 简体中文 (cmn-Hans), wordnet
 - **表数量**: 26 张表
-- **行数规模**: 约 120 万行
+- **行数规模**: 英文约 120 万行，中文约 25 万行，合计约 145 万行
 
 ---
 
@@ -56,23 +55,7 @@ ILI 有两种状态：
 
 ```mermaid
 erDiagram
-    lexicons["lexicons (1 row)"] {
-        int rowid PK
-        string specifier UK
-        string id
-        string label
-        string language
-        string email
-        string license
-        string version
-        string url
-        string citation
-        string logo
-        json metadata
-        bool modified
-    }
-
-    entries["entries (161,875 rows)"] {
+    entries["entries (225,222 rows)"] {
         int rowid PK
         string id
         int lexicon_rowid FK
@@ -80,7 +63,7 @@ erDiagram
         json metadata
     }
 
-    forms["forms (166,349 rows)"] {
+    forms["forms (229,696 rows)"] {
         int rowid PK
         string id
         int lexicon_rowid FK
@@ -91,7 +74,7 @@ erDiagram
         int rank
     }
 
-    senses["senses (212,659 rows)"] {
+    senses["senses (292,468 rows)"] {
         int rowid PK
         string id
         int lexicon_rowid FK
@@ -102,7 +85,7 @@ erDiagram
         json metadata
     }
 
-    synsets["synsets (120,564 rows)"] {
+    synsets["synsets (162,876 rows)"] {
         int rowid PK
         string id
         int lexicon_rowid FK
@@ -214,18 +197,6 @@ erDiagram
         text definition
         json metadata
     }
-
-    lexicons ||--o{ entries : contains
-    lexicons ||--o{ forms : contains
-    lexicons ||--o{ senses : contains
-    lexicons ||--o{ synsets : contains
-    lexicons ||--o{ definitions : contains
-    lexicons ||--o{ synset_relations : contains
-    lexicons ||--o{ sense_relations : contains
-    lexicons ||--o{ sense_synset_relations : contains
-    lexicons ||--o{ pronunciations : contains
-    lexicons ||--o{ synset_examples : contains
-    lexicons ||--o{ syntactic_behaviours : contains
 
     entries ||--o{ forms : word_forms
     entries ||--o{ senses : has_sense
@@ -452,7 +423,7 @@ lexicons (1) ──── oewn:2025+
 | metadata | META | 元数据 (JSON) |
 | modified | BOOLEAN | 是否被修改 |
 
-当前数据：1 行，词库为 `oewn:2025+`。
+当前数据：2 行，oewn:2025+（英文）和 omw-cmn:1.4（中文）。
 
 #### entries — 词条
 
@@ -464,7 +435,7 @@ lexicons (1) ──── oewn:2025+
 | pos | TEXT | 词性 (n/v/a/r/s) |
 | metadata | META | 元数据 |
 
-唯一约束：`(id, lexicon_rowid)`。行数：161,875。
+唯一约束：`(id, lexicon_rowid)`。行数：225,222（英文 161,875 + 中文 63,347）。
 
 #### forms — 词形
 
@@ -479,7 +450,7 @@ lexicons (1) ──── oewn:2025+
 | script | TEXT | 书写系统 |
 | rank | INTEGER DEFAULT 1 | 排序，0 为首选词形（lemma） |
 
-唯一约束：`(entry_rowid, form, script)`。行数：166,349。
+唯一约束：`(entry_rowid, form, script)`。行数：229,696（英文 166,349 + 中文 63,347）。
 
 #### synsets — 同义词集
 
@@ -493,7 +464,7 @@ lexicons (1) ──── oewn:2025+
 | lexfile_rowid | INTEGER FK → lexfiles | 语义域分类 |
 | metadata | META | 元数据 |
 
-行数：120,564。ID 格式：`oewn-` + 8 位数字偏移 + `-` + 词性。
+行数：162,876（英文 120,564 + 中文 42,312）。ID 前缀：`oewn-`（英文）、`omw-cmn-`（中文）。
 
 #### senses — 义项
 
@@ -508,7 +479,7 @@ lexicons (1) ──── oewn:2025+
 | synset_rank | INTEGER DEFAULT 1 | 在同义词集中的排序 |
 | metadata | META | 元数据 |
 
-行数：212,659。Sense 是 Entry 和 Synset 之间的多对多关联表。
+行数：292,468（英文 212,659 + 中文 79,809）。Sense 是 Entry 和 Synset 之间的多对多关联表。
 
 ---
 
