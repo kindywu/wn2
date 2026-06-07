@@ -1,9 +1,11 @@
 ``` sql
-SELECT e.id, e.pos, f.form, f.rank
-    FROM entries e
-    JOIN forms f ON f.entry_rowid = e.rowid
-    WHERE f.form = 'bank'
-    ORDER BY f.rank;
+SELECT e.id, e.pos, f.form, f.rank,
+      p.value AS ipa, p.variety, p.notation, p.phonemic, p.audio
+ FROM entries e
+ JOIN forms f ON f.entry_rowid = e.rowid
+ LEFT JOIN pronunciations p ON p.form_rowid = f.rowid
+ WHERE f.form = 'bank'
+ ORDER BY f.rank, p.variety;
 ```
 
 ``` sql
@@ -22,4 +24,14 @@ SELECT e.pos,
   WHERE f.form = 'bank'
   GROUP BY se.rowid, e.pos, se.entry_rank, se.synset_rank, f.form, d.definition
   ORDER BY e.pos, se.entry_rank;
+```
+
+``` sql
+SELECT e.id, e.pos, f.form, f.rank,
+       p.value AS ipa, p.variety, p.notation, p.phonemic, p.audio
+  FROM entries e
+  JOIN forms f ON f.entry_rowid = e.rowid
+  LEFT JOIN pronunciations p ON p.form_rowid = f.rowid
+  WHERE f.form = 'bank'
+  ORDER BY f.rank, p.variety;
 ```
