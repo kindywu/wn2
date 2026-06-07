@@ -8,7 +8,7 @@ SELECT e.id, e.pos, f.form, f.rank
 
 ``` sql
 SELECT e.pos,
-       se.entry_rank,
+       se.entry_rank,se.synset_rank,
        f.form,
        STRING_AGG(m.form, ', ') AS synset_members,
        d.definition
@@ -20,6 +20,6 @@ SELECT e.pos,
   JOIN senses se2 ON se2.synset_rowid = s.rowid
   JOIN forms m ON m.entry_rowid = se2.entry_rowid AND m.rank = 0
   WHERE f.form = 'bank'
-  GROUP BY se.rowid, e.pos, se.entry_rank, f.form, d.definition
+  GROUP BY se.rowid, e.pos, se.entry_rank, se.synset_rank, f.form, d.definition
   ORDER BY e.pos, se.entry_rank;
 ```
