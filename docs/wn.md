@@ -722,3 +722,79 @@ WHERE se.synset_rowid = (
 | `synset.lemmas()` | senses → entries → forms |
 | `sense.relations()` | sense_relations |
 | `wordnet.ilis` | ilis |
+
+---
+
+## 中文 WordNet (omw-cmn)
+
+### 概述
+
+wn.db 中包含 **两个词库**（通过 `lexicons` 表管理）：
+
+| rowid | id | label | language | version |
+|-------|-----|-------|----------|---------|
+| 1 | oewn | Open English Wordnet | en | 2025+ |
+| 2 | omw-cmn | Chinese Open Wordnet | cmn-Hans | 1.4 |
+
+中文词库是 **Open Multilingual WordNet** 的一部分，与英文词库共享同一套 WN-LMF 表结构，通过 `lexicon_rowid` 区分。
+
+### 数据规模对比
+
+| 表 | 英文 (oewn) | 中文 (omw-cmn) |
+|----|------------|---------------|
+| entries | 161,875 | 63,347 |
+| forms | 166,349 | 63,347 |
+| senses | 212,659 | 79,809 |
+| synsets | 120,564 | 42,312 |
+| definitions | 120,569 | 0 |
+| synset_examples | 49,724 | 0 |
+| synset_relations | 297,172 | 0 |
+| sense_relations | 122,054 | 0 |
+
+### 关键差异
+
+**中文词库不包含定义、例句和语义关系。** 中文 synset 通过 **ILI（跨语言索引）** 与英文 synset 共享概念，定义和关系全部复用英文侧数据。
+
+```
+中文 synset ──(ili_rowid)──→ ILI ←──(ili_rowid)── 英文 synset
+                                                        │
+                                                        ├── definitions (英文定义)
+                                                        ├── synset_relations (上下位等)
+                                                        └── synset_examples (英文例句)
+```
+
+### 数据特点
+
+- **一对多映射**：一个中文 synset 通过 ILI 对应一个英文 synset，但一个英文 synset 可能对应多个中文词条的 sense
+- **词性分布**：中文词条覆盖 n（名词）、v（动词）、a（形容词）、r（副词）
+- **lemma 即词形**：中文词条的 form 和 entry 一一对应（63,347 entries = 63,347 forms），不存在复数/时态等变体
+- **无句法行为**：中文侧没有 `syntactic_behaviours` 数据
+
+### 中英文跨语言查询示例
+
+查中文词"银行"对应的英文同义词集和定义：
+
+```sql
+SELECT f_en.form, d.definition
+FROM entries e_cmn
+JOIN forms f_cmn ON f_cmn.entry_rowid = e_cmn.rowid AND f_cmn.rank = 0
+JOIN senses se_cmn ON se_cmn.entry_rowid = e_cmn.rowid
+JOIN synsets s_cmn ON se_cmn.synset_rowid = s_cmn.rowid
+JOIN ilis i ON s_cmn.ili_rowid = i.rowid
+JOIN synsets s_en ON s_en.ili_rowid = i.rowid AND s_en.lexicon_rowid = 1
+JOIN senses se_en ON se_en.synset_rowid = s_en.rowid
+JOIN entries e_en ON se_en.entry_rowid = e_en.rowid
+JOIN forms f_en ON f_en.entry_rowid = e_en.rowid AND f_en.rank = 0
+JOIN definitions d ON d.synset_rowid = s_en.rowid
+WHERE f_cmn.form = '银行';
+```
+
+### ILI 作为跨语言桥梁
+
+ILI 表（117,435 行）本身独立于语言，中文和英文 synset 通过指向同一个 ILI 建立概念映射。中文词库 42,312 个 synset 各自指向唯一的 ILI，其中：
+
+- 部分 ILI 同时被中英文 synset 引用（可直接跨语言映射）
+- 部分 ILI 仅被中文 synset 引用（中文独有的概念）
+- 英文侧 120,564 个 synset 中的 42,312 个有中文映射，其余暂无
+
+ILI 状态仍为 `presupposed`（已确认），中文 ILI 映射来自 OMW 项目发布的稳定版本。
