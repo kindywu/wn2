@@ -1,7 +1,12 @@
+import os
 import sqlite3
-import psycopg2
 
-PG_URL = "postgresql://postgres:kindy@localhost:5432/dict"
+import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
+
+PG_URL = os.getenv("PG_URL")
 SCHEMA = "wn"
 
 # WN-LMF tables in dependency order (parents before children)
