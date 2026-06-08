@@ -55,178 +55,229 @@ ILI 有两种状态：
 
 ```mermaid
 erDiagram
-    entries["entries (225,222 rows)"] {
-        int rowid PK
-        string id
-        int lexicon_rowid FK
-        string pos
-        json metadata
+    entries["entries 词条 (225,222 rows)"] {
+        int rowid PK "内部自增主键"
+        string id "词条唯一标识，如 oewn-bank-n"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        string pos "词性：n 名词/v 动词/a 形容词/r 副词/s 形卫星"
+        json metadata "附加元数据（JSON）"
     }
 
-    forms["forms (229,696 rows)"] {
-        int rowid PK
-        string id
-        int lexicon_rowid FK
-        int entry_rowid FK
-        string form
-        string normalized_form
-        string script
-        int rank
+    forms["forms 词形 (229,696 rows)"] {
+        int rowid PK "内部自增主键"
+        string id "词形唯一标识"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int entry_rowid FK "所属词条的内部 ID"
+        string form "词形文本，如 bank"
+        string normalized_form "标准化词形（通常小写），用于搜索匹配"
+        string script "书写系统代码"
+        int rank "排序权重，0 为首选词形（lemma）"
     }
 
-    senses["senses (292,468 rows)"] {
-        int rowid PK
-        string id
-        int lexicon_rowid FK
-        int entry_rowid FK
-        int entry_rank
-        int synset_rowid FK
-        int synset_rank
-        json metadata
+    senses["senses 义项 (292,468 rows)"] {
+        int rowid PK "内部自增主键"
+        string id "义项唯一标识"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int entry_rowid FK "所属词条的内部 ID"
+        int entry_rank "在该词条所有义项中的排序"
+        int synset_rowid FK "所属同义词集的内部 ID"
+        int synset_rank "在该同义词集所有义项中的排序"
+        json metadata "附加元数据（JSON）"
     }
 
-    synsets["synsets (162,876 rows)"] {
-        int rowid PK
-        string id
-        int lexicon_rowid FK
-        int ili_rowid FK
-        string pos
-        int lexfile_rowid FK
-        json metadata
+    synsets["synsets 同义词集 (162,876 rows)"] {
+        int rowid PK "内部自增主键"
+        string id "同义词集唯一标识，如 oewn-00001740-n"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int ili_rowid FK "跨语言索引 ID，用于多语言概念映射"
+        string pos "词性：n/v/a/r/s"
+        int lexfile_rowid FK "语义域分类 ID"
+        json metadata "附加元数据（JSON）"
     }
 
-    definitions["definitions (120,569 rows)"] {
-        int rowid PK
-        int lexicon_rowid FK
-        int synset_rowid FK
-        text definition
-        string language
-        int sense_rowid FK
-        json metadata
+    definitions["definitions 定义 (120,569 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int synset_rowid FK "所属同义词集的内部 ID"
+        text definition "定义文本，如 a financial institution..."
+        string language "语言标签（BCP-47），如 en"
+        int sense_rowid FK "所属具体义项（可选）"
+        json metadata "附加元数据（JSON）"
     }
 
-    ilis["ilis (117,351 rows)"] {
-        int rowid PK
-        string id UK
-        int status_rowid FK
-        text definition
-        json metadata
+    ilis["ilis 跨语言索引 (117,351 rows)"] {
+        int rowid PK "内部自增主键"
+        string id UK "ILI 唯一标识，如 i81364"
+        int status_rowid FK "状态 ID（presupposed/proposed）"
+        text definition "跨语言通用定义"
+        json metadata "附加元数据（JSON）"
     }
 
-    ili_statuses["ili_statuses (2 rows)"] {
-        int rowid PK
-        string status UK
+    ili_statuses["ili_statuses ILI 状态 (2 rows)"] {
+        int rowid PK "内部自增主键"
+        string status UK "状态名称：presupposed 已确认 / proposed 待审核"
     }
 
-    lexfiles["lexfiles (45 rows)"] {
-        int rowid PK
-        string name UK
+    lexfiles["lexfiles 语义域 (45 rows)"] {
+        int rowid PK "内部自增主键"
+        string name UK "语义域名称，如 noun.group"
     }
 
-    relation_types["relation_types (28 rows)"] {
-        int rowid PK
-        string type UK
+    relation_types["relation_types 关系类型 (28 rows)"] {
+        int rowid PK "内部自增主键"
+        string type UK "关系类型名称，如 hypernym / hyponym"
     }
 
-    synset_relations["synset_relations (297,172 rows)"] {
-        int rowid PK
-        int lexicon_rowid FK
-        int source_rowid FK
-        int target_rowid FK
-        int type_rowid FK
-        json metadata
+    synset_relations["synset_relations 同义词集关系 (297,172 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int source_rowid FK "源同义词集的内部 ID"
+        int target_rowid FK "目标同义词集的内部 ID"
+        int type_rowid FK "关系类型 ID"
+        json metadata "附加元数据（JSON）"
     }
 
-    sense_relations["sense_relations (122,054 rows)"] {
-        int rowid PK
-        int lexicon_rowid FK
-        int source_rowid FK
-        int target_rowid FK
-        int type_rowid FK
-        json metadata
+    sense_relations["sense_relations 义项关系 (122,054 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int source_rowid FK "源义项的内部 ID"
+        int target_rowid FK "目标义项的内部 ID"
+        int type_rowid FK "关系类型 ID"
+        json metadata "附加元数据（JSON）"
     }
 
-    sense_synset_relations["sense_synset_relations (0 rows)"] {
-        int rowid PK
-        int lexicon_rowid FK
-        int source_rowid FK
-        int target_rowid FK
-        int type_rowid FK
-        json metadata
+    sense_synset_relations["sense_synset_relations 义项-同义词集关系 (0 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int source_rowid FK "源义项的内部 ID"
+        int target_rowid FK "目标同义词集的内部 ID"
+        int type_rowid FK "关系类型 ID"
+        json metadata "附加元数据（JSON）"
     }
 
-    pronunciations["pronunciations (44,638 rows)"] {
-        int form_rowid FK
-        int lexicon_rowid FK
-        text value
-        string variety
-        string notation
-        bool phonemic
-        text audio
+    pronunciations["pronunciations 发音 (44,638 rows)"] {
+        int form_rowid FK "所属词形的内部 ID"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        text value "IPA 音标文本，如 ɡɪv"
+        string variety "口音变体，如 US / GB"
+        string notation "标音体系名称"
+        bool phonemic "是否为音位标音（1=是，0=否）"
+        text audio "发音音频文件 URL"
     }
 
-    synset_examples["synset_examples (49,724 rows)"] {
-        int rowid PK
-        int lexicon_rowid FK
-        int synset_rowid FK
-        text example
-        string language
-        json metadata
+    synset_examples["synset_examples 同义词集例句 (49,724 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int synset_rowid FK "所属同义词集的内部 ID"
+        text example "例句文本"
+        string language "语言标签（BCP-47）"
+        json metadata "附加元数据（JSON）"
     }
 
-    syntactic_behaviours["syntactic_behaviours (39 rows)"] {
-        int rowid PK
-        string id
-        int lexicon_rowid FK
-        string frame UK
+    syntactic_behaviours["syntactic_behaviours 句法行为 (39 rows)"] {
+        int rowid PK "内部自增主键"
+        string id "句法行为标识，如 vtai / via"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        string frame UK "句法框架模板，如 Somebody ----s something"
     }
 
-    syntactic_behaviour_senses["syntactic_behaviour_senses (41,650 rows)"] {
-        int syntactic_behaviour_rowid FK
-        int sense_rowid FK
+    syntactic_behaviour_senses["syntactic_behaviour_senses 句法行为-义项关联 (41,650 rows)"] {
+        int syntactic_behaviour_rowid FK "句法行为的内部 ID"
+        int sense_rowid FK "义项的内部 ID"
     }
 
-    adjpositions["adjpositions (1,052 rows)"] {
-        int sense_rowid FK
-        string adjposition
+    adjpositions["adjpositions 形容词位置 (1,052 rows)"] {
+        int sense_rowid FK "所属义项的内部 ID"
+        string adjposition "句法位置：predicative 表语 / attributive 定语 / immediate_postnominal 紧接名词后"
     }
 
-    proposed_ilis["proposed_ilis (3,213 rows)"] {
-        int rowid PK
-        int synset_rowid FK
-        text definition
-        json metadata
+    proposed_ilis["proposed_ilis 提议的 ILI (3,213 rows)"] {
+        int rowid PK "内部自增主键"
+        int synset_rowid FK "提议来源同义词集的内部 ID"
+        text definition "提议的跨语言通用定义"
+        json metadata "附加元数据（JSON）"
     }
 
-    entries ||--o{ forms : word_forms
-    entries ||--o{ senses : has_sense
+    counts["counts 频次统计 (0 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int sense_rowid FK "所属义项的内部 ID"
+        int count "使用频次数值"
+        json metadata "附加元数据（JSON）"
+    }
 
-    forms ||--o{ pronunciations : pronounced_as
+    entry_index["entry_index 词条索引 (0 rows)"] {
+        int entry_rowid FK "词条的内部 ID"
+        string lemma "词元（lemma）文本"
+    }
 
-    senses ||--o{ sense_relations : source
-    senses ||--o{ sense_relations : target
-    senses ||--o{ sense_synset_relations : source
-    senses ||--o{ syntactic_behaviour_senses : has_behaviour
-    senses ||--o{ adjpositions : positioned_as
-    senses }o--|| synsets : belongs_to
-    senses }o--|| definitions : defined_by
+    tags["tags 词形标签 (0 rows)"] {
+        int form_rowid FK "所属词形的内部 ID"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        string tag "标签值"
+        string category "标签类别"
+    }
 
-    synsets ||--o{ synset_relations : source
-    synsets ||--o{ synset_relations : target
-    synsets ||--o{ sense_synset_relations : target
-    synsets ||--o{ definitions : defined_by
-    synsets ||--o{ synset_examples : example_of
-    synsets ||--o{ proposed_ilis : proposes
-    synsets }o--|| ilis : maps_to
-    synsets }o--|| lexfiles : categorized_as
+    lexicon_dependencies["lexicon_dependencies 词库依赖 (0 rows)"] {
+        int dependent_rowid FK "依赖方词库的内部 ID"
+        string provider_id "提供方词库 ID"
+        string provider_version "提供方词库版本"
+        string provider_url "提供方词库 URL"
+        int provider_rowid FK "提供方词库的内部 ID（可选）"
+    }
 
-    ilis }o--|| ili_statuses : has_status
+    lexicon_extensions["lexicon_extensions 词库扩展 (0 rows)"] {
+        int extension_rowid FK "扩展方词库的内部 ID"
+        string base_id "基础词库 ID"
+        string base_version "基础词库版本"
+        string base_url "基础词库 URL"
+        int base_rowid FK "基础词库的内部 ID（可选）"
+    }
 
-    synset_relations }o--|| relation_types : typed_as
-    sense_relations }o--|| relation_types : typed_as
-    sense_synset_relations }o--|| relation_types : typed_as
+    sense_examples["sense_examples 义项例句 (0 rows)"] {
+        int rowid PK "内部自增主键"
+        int lexicon_rowid FK "所属词库的内部 ID"
+        int sense_rowid FK "所属义项的内部 ID"
+        text example "例句文本"
+        string language "语言标签（BCP-47）"
+        json metadata "附加元数据（JSON）"
+    }
 
-    syntactic_behaviour_senses }o--|| syntactic_behaviours : references
+    unlexicalized_senses["unlexicalized_senses 未词化义项 (0 rows)"] {
+        int sense_rowid FK "标记为未词化的义项 ID"
+    }
+
+    unlexicalized_synsets["unlexicalized_synsets 未词化同义词集 (0 rows)"] {
+        int synset_rowid FK "标记为未词化的同义词集 ID"
+    }
+
+    entries ||--o{ forms : "包含词形"
+    entries ||--o{ senses : "拥有义项"
+
+    forms ||--o{ pronunciations : "发音信息"
+
+    senses ||--o{ sense_relations : "作为关系源/目标"
+    senses ||--o{ sense_synset_relations : "作为关系源"
+    senses ||--o{ syntactic_behaviour_senses : "句法行为"
+    senses ||--o{ adjpositions : "形容词位置"
+    senses }o--|| synsets : "属于同义词集"
+    senses }o--|| definitions : "通过义项关联定义"
+
+    synsets ||--o{ synset_relations : "作为关系源/目标"
+    synsets ||--o{ sense_synset_relations : "作为关系目标"
+    synsets ||--o{ definitions : "拥有定义"
+    synsets ||--o{ synset_examples : "拥有例句"
+    synsets ||--o{ proposed_ilis : "提议 ILI"
+    synsets }o--|| ilis : "映射到跨语言索引"
+    synsets }o--|| lexfiles : "语义域分类"
+
+    ilis }o--|| ili_statuses : "拥有状态"
+
+    synset_relations }o--|| relation_types : "关系类型"
+    sense_relations }o--|| relation_types : "关系类型"
+    sense_synset_relations }o--|| relation_types : "关系类型"
+
+    syntactic_behaviour_senses }o--|| syntactic_behaviours : "引用句法行为"
 ```
 
 ---
@@ -363,7 +414,7 @@ synset_relations: source_rowid → target_rowid (via relation_types)
 
 ### 空表的位置
 
-`counts`、`entry_index`、`tags`、`sense_synset_relations`、`lexicon_dependencies`、`lexicon_extensions` 等表在当前数据库中为空，但它们是 WN-LMF 规范预留的结构，供扩展使用（词频统计、词形标签、跨词库依赖等）。
+`counts`、`entry_index`、`tags`、`sense_synset_relations`、`lexicon_dependencies`、`lexicon_extensions`、`unlexicalized_senses`、`unlexicalized_synsets` 等表在当前数据库中为空，但它们是 WN-LMF 规范预留的结构，供扩展使用（词频统计、词形标签、跨词库依赖等）。
 
 ### 完整关系链路图
 
@@ -409,19 +460,19 @@ lexicons (1) ──── oewn:2025+
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| specifier | TEXT UNIQUE | 词库标识符 `id:version` |
-| id | TEXT | 用户面向 ID |
-| label | TEXT | 显示名称 |
-| language | TEXT | BCP-47 语言标签 |
+| rowid | INTEGER PK | 内部自增主键 |
+| specifier | TEXT UNIQUE | 词库标识符 `id:version`，如 `oewn:2025+` |
+| id | TEXT | 用户面向 ID，如 `oewn` |
+| label | TEXT | 显示名称，如 `Open English Wordnet` |
+| language | TEXT | BCP-47 语言标签，如 `en`、`cmn-Hans` |
 | email | TEXT | 联系邮箱 |
 | license | TEXT | 许可证 URL |
 | version | TEXT | 版本号 |
 | url | TEXT | 项目 URL |
 | citation | TEXT | 引用信息 |
 | logo | TEXT | Logo URL |
-| metadata | META | 元数据 (JSON) |
-| modified | BOOLEAN | 是否被修改 |
+| metadata | META | 附加元数据（JSON） |
+| modified | BOOLEAN | 是否被修改：0 否 / 1 是 |
 
 当前数据：2 行，oewn:2025+（英文）和 omw-cmn:1.4（中文）。
 
@@ -429,11 +480,11 @@ lexicons (1) ──── oewn:2025+
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| id | TEXT NOT NULL | 词条 ID，如 `oewn-bank-n` |
-| lexicon_rowid | INTEGER FK → lexicons | 所属词库 |
-| pos | TEXT | 词性 (n/v/a/r/s) |
-| metadata | META | 元数据 |
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT NOT NULL | 词条唯一标识，如 `oewn-bank-n` |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| pos | TEXT | 词性：`n` 名词 / `v` 动词 / `a` 形容词 / `r` 副词 / `s` 形容词卫星 |
+| metadata | META | 附加元数据（JSON） |
 
 唯一约束：`(id, lexicon_rowid)`。行数：225,222（英文 161,875 + 中文 63,347）。
 
@@ -441,14 +492,14 @@ lexicons (1) ──── oewn:2025+
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| id | TEXT | 词形 ID |
-| lexicon_rowid | INTEGER FK → lexicons | 所属词库 |
-| entry_rowid | INTEGER FK → entries | 所属词条 |
-| form | TEXT NOT NULL | 词形文本 |
-| normalized_form | TEXT | 标准化词形（小写等） |
-| script | TEXT | 书写系统 |
-| rank | INTEGER DEFAULT 1 | 排序，0 为首选词形（lemma） |
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT | 词形唯一标识 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| entry_rowid | INTEGER FK → entries | 所属词条的内部 ID |
+| form | TEXT NOT NULL | 词形文本，如 `bank`、`banks` |
+| normalized_form | TEXT | 标准化词形（小写等），用于搜索匹配 |
+| script | TEXT | 书写系统代码 |
+| rank | INTEGER DEFAULT 1 | 排序权重，0 为首选词形（lemma） |
 
 唯一约束：`(entry_rowid, form, script)`。行数：229,696（英文 166,349 + 中文 63,347）。
 
@@ -456,13 +507,13 @@ lexicons (1) ──── oewn:2025+
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| id | TEXT NOT NULL | 同义词集 ID，如 `oewn-00001740-n` |
-| lexicon_rowid | INTEGER FK → lexicons | 所属词库 |
-| ili_rowid | INTEGER FK → ilis | 跨语言索引 |
-| pos | TEXT | 词性 |
-| lexfile_rowid | INTEGER FK → lexfiles | 语义域分类 |
-| metadata | META | 元数据 |
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT NOT NULL | 同义词集唯一标识，如 `oewn-00001740-n` |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| ili_rowid | INTEGER FK → ilis | 跨语言索引 ID，用于多语言概念映射 |
+| pos | TEXT | 词性：`n`/`v`/`a`/`r`/`s` |
+| lexfile_rowid | INTEGER FK → lexfiles | 语义域分类 ID |
+| metadata | META | 附加元数据（JSON） |
 
 行数：162,876（英文 120,564 + 中文 42,312）。ID 前缀：`oewn-`（英文）、`omw-cmn-`（中文）。
 
@@ -470,14 +521,14 @@ lexicons (1) ──── oewn:2025+
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| id | TEXT NOT NULL | 义项 ID |
-| lexicon_rowid | INTEGER FK → lexicons | 所属词库 |
-| entry_rowid | INTEGER FK → entries | 所属词条 |
-| entry_rank | INTEGER DEFAULT 1 | 在词条中的排序 |
-| synset_rowid | INTEGER FK → synsets | 所属同义词集 |
-| synset_rank | INTEGER DEFAULT 1 | 在同义词集中的排序 |
-| metadata | META | 元数据 |
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT NOT NULL | 义项唯一标识 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| entry_rowid | INTEGER FK → entries | 所属词条的内部 ID |
+| entry_rank | INTEGER DEFAULT 1 | 在该词条所有义项中的排序 |
+| synset_rowid | INTEGER FK → synsets | 所属同义词集的内部 ID |
+| synset_rank | INTEGER DEFAULT 1 | 在该同义词集所有义项中的排序 |
+| metadata | META | 附加元数据（JSON） |
 
 行数：292,468（英文 212,659 + 中文 79,809）。Sense 是 Entry 和 Synset 之间的多对多关联表。
 
@@ -539,13 +590,40 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 
 这是 WordNet 最核心的关系表，共 297,172 行。
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| source_rowid | INTEGER FK → synsets | 源同义词集的内部 ID |
+| target_rowid | INTEGER FK → synsets | 目标同义词集的内部 ID |
+| type_rowid | INTEGER FK → relation_types | 关系类型 ID |
+| metadata | META | 附加元数据（JSON） |
+
 #### sense_relations — 义项关系
 
 义项之间的语义关系，如反义关系（antonym）、派生关系（derivation）。粒度比 synset_relations 更细，关联到具体词条的特定含义。共 122,054 行。
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| source_rowid | INTEGER FK → senses | 源义项的内部 ID |
+| target_rowid | INTEGER FK → senses | 目标义项的内部 ID |
+| type_rowid | INTEGER FK → relation_types | 关系类型 ID |
+| metadata | META | 附加元数据（JSON） |
+
 #### sense_synset_relations — 义项-同义词集关系
 
 跨层级的关系，连接 sense 到 synset。当前表为空（预留结构）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| source_rowid | INTEGER FK → senses | 源义项的内部 ID |
+| target_rowid | INTEGER FK → synsets | 目标同义词集的内部 ID |
+| type_rowid | INTEGER FK → relation_types | 关系类型 ID |
+| metadata | META | 附加元数据（JSON） |
 
 ---
 
@@ -557,13 +635,41 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 
 > (usually followed by 'to') having the necessary means or skill or know-how or authority to do something
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| synset_rowid | INTEGER FK → synsets | 所属同义词集的内部 ID |
+| definition | TEXT | 定义文本 |
+| language | TEXT | 语言标签（BCP-47），如 `en` |
+| sense_rowid | INTEGER FK → senses | 所属具体义项（可选） |
+| metadata | META | 附加元数据（JSON） |
+
 #### synset_examples — 同义词集例句
 
 为 synset 提供的使用例句。共 49,724 行。
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| synset_rowid | INTEGER FK → synsets | 所属同义词集的内部 ID |
+| example | TEXT | 例句文本 |
+| language | TEXT | 语言标签（BCP-47） |
+| metadata | META | 附加元数据（JSON） |
+
 #### sense_examples — 义项例句
 
 为具体义项提供的例句，粒度比 synset_examples 更细。当前为空。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| sense_rowid | INTEGER FK → senses | 所属义项的内部 ID |
+| example | TEXT | 例句文本 |
+| language | TEXT | 语言标签（BCP-47） |
+| metadata | META | 附加元数据（JSON） |
 
 ---
 
@@ -571,23 +677,35 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 
 #### ili_statuses — ILI 状态
 
-2 行：`presupposed`（预设）、`proposed`（提议）。
+2 行：`presupposed`（已确认）、`proposed`（待审核）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| status | TEXT UNIQUE | 状态名称：presupposed 已确认 / proposed 待审核 |
 
 #### ilis — 跨语言索引
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| rowid | INTEGER PK | 内部 ID |
-| id | TEXT UNIQUE NOT NULL | ILI ID |
-| status_rowid | INTEGER FK → ili_statuses | 状态 |
-| definition | TEXT | 多语言通用定义 |
-| metadata | META | 元数据 |
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT UNIQUE NOT NULL | ILI 唯一标识，如 `i81364` |
+| status_rowid | INTEGER FK → ili_statuses | 状态 ID |
+| definition | TEXT | 跨语言通用定义 |
+| metadata | META | 附加元数据（JSON） |
 
 共 117,351 行。
 
 #### proposed_ilis — 提议的 ILI
 
 待审核的 ILI 映射提议，共 3,213 行。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| synset_rowid | INTEGER FK → synsets | 提议来源同义词集的内部 ID |
+| definition | TEXT | 提议的跨语言通用定义 |
+| metadata | META | 附加元数据（JSON） |
 
 ---
 
@@ -596,6 +714,16 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 #### pronunciations — 发音
 
 词形的 IPA 音标信息，支持不同口音变体（US/GB）。`phonemic=1` 表示音位标音（broad transcription）。共 44,638 行。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| form_rowid | INTEGER FK → forms | 所属词形的内部 ID |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| value | TEXT | IPA 音标文本，如 `ɡɪv` |
+| variety | TEXT | 口音变体，如 US / GB |
+| notation | TEXT | 标音体系名称 |
+| phonemic | BOOLEAN | 是否为音位标音：1 是 / 0 否 |
+| audio | TEXT | 发音音频文件 URL |
 
 #### syntactic_behaviours — 句法行为
 
@@ -613,11 +741,32 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 
 命名规则：`v`=verb，`t`=transitive，`i`=intransitive，`a`=animate（有灵），`i`=inanimate（无灵）。例如 `vtaa` = verb transitive animate-animate（及物动词，主语宾语均为有灵）。
 
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| id | TEXT | 句法行为标识，如 `vtai` / `via` |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| frame | TEXT UK | 句法框架模板，如 `Somebody ----s something` |
+
 每个 sense 通过 `syntactic_behaviour_senses`（41,650 行）关联到其适用的句法行为模式。
+
+#### syntactic_behaviour_senses — 句法行为-义项关联
+
+连接 sense 与 syntactic_behaviours 的多对多关联表。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| syntactic_behaviour_rowid | INTEGER FK → syntactic_behaviours | 句法行为的内部 ID |
+| sense_rowid | INTEGER FK → senses | 义项的内部 ID |
 
 #### adjpositions — 形容词位置
 
 记录形容词的句法位置（如 predicative/attributive），共 1,052 行。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| sense_rowid | INTEGER FK → senses | 所属义项的内部 ID |
+| adjposition | TEXT | 句法位置：predicative 表语 / attributive 定语 / immediate_postnominal 紧接名词后 |
 
 ---
 
@@ -625,15 +774,63 @@ synset 之间的语义关系，构成 WordNet 的层级结构。例如：
 
 以下表是 WN-LMF 规范定义的结构，当前数据中为空：
 
-| 表名 | 用途 |
-|------|------|
-| counts | 义项使用频次统计 |
-| entry_index | 按 lemma 快速查找词条 |
-| tags | 词形标签（如语体标注） |
-| lexicon_dependencies | 词库间的依赖关系 |
-| lexicon_extensions | 词库间的扩展关系 |
-| unlexicalized_senses | 标记未词化的义项 |
-| unlexicalized_synsets | 标记未词化的同义词集 |
+#### counts — 频次统计
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| rowid | INTEGER PK | 内部自增主键 |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| sense_rowid | INTEGER FK → senses | 所属义项的内部 ID |
+| count | INTEGER | 使用频次数值 |
+| metadata | META | 附加元数据（JSON） |
+
+#### entry_index — 词条索引
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| entry_rowid | INTEGER FK → entries | 词条的内部 ID |
+| lemma | TEXT | 词元（lemma）文本 |
+
+#### tags — 词形标签
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| form_rowid | INTEGER FK → forms | 所属词形的内部 ID |
+| lexicon_rowid | INTEGER FK → lexicons | 所属词库的内部 ID |
+| tag | TEXT | 标签值 |
+| category | TEXT | 标签类别 |
+
+#### lexicon_dependencies — 词库依赖
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| dependent_rowid | INTEGER FK → lexicons | 依赖方词库的内部 ID |
+| provider_id | TEXT | 提供方词库 ID |
+| provider_version | TEXT | 提供方词库版本 |
+| provider_url | TEXT | 提供方词库 URL |
+| provider_rowid | INTEGER FK → lexicons | 提供方词库的内部 ID（可选） |
+
+#### lexicon_extensions — 词库扩展
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| extension_rowid | INTEGER FK → lexicons | 扩展方词库的内部 ID |
+| base_id | TEXT | 基础词库 ID |
+| base_version | TEXT | 基础词库版本 |
+| base_url | TEXT | 基础词库 URL |
+| base_rowid | INTEGER FK → lexicons | 基础词库的内部 ID（可选） |
+
+#### unlexicalized_senses — 未词化义项
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| sense_rowid | INTEGER FK → senses | 标记为未词化的义项 ID |
+
+#### unlexicalized_synsets — 未词化同义词集
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| synset_rowid | INTEGER FK → synsets | 标记为未词化的同义词集 ID |
 
 ---
 
