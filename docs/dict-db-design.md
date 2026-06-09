@@ -1,69 +1,101 @@
 # dict.db 设计文档
 
-## 概述
+## 1. 概述
 
-`dict.db` 是词典应用的自主规范数据源，整合三类来源：
+### 1.1 目标
+
+`dict.db` 是词典应用的**自主规范数据源**。外部数据仅作为上游导入管道，应用层只读写这一个数据库，不关心数据最初来自哪里。
+
+### 1.2 数据来源与关系
+
+三类来源，分层递进：
 
 | 来源 | 特质 | 角色 |
 |------|------|------|
-| 外部数据源 (stardict, wn) | 快速、免费、规模化 | 数据基底，批量导入，覆盖大部分常用词 |
-| LLM | 灵活、按需、费钱 | 空缺填充，外部源覆盖不到的地方 |
-| 人工 | 最可靠、不可规模化 | 质量闸门，审核/修正/新建 |
-
-### 三层递进关系
+| 外部数据源 (stardict.db, wn.db) | 快速、免费、可规模化 | 数据基底，批量导入覆盖大部分常用词 |
+| LLM | 灵活、按需、费钱 | 空缺填充 + 质量评价 |
+| 人工 | 最可靠、不可规模化 | 质量闸门，审核、修正、新建 |
 
 ```
-外部数据源 (基底)     →  批量导入，confidence=1.0
+外部数据源 (基底)  ──→  批量导入全量数据
       ↓ 空缺
-LLM (填充层)         →  按需补全，confidence=0.5~0.7
+LLM (填充层)      ──→  按需补全缺失字段，不覆盖外部源已有数据
       ↓ 未审核
-人工 (质量闸门)       →  审核/修正/新建，confidence=1.0
+人工 (质量闸门)    ──→  审核、修正、新建，覆盖一切
 ```
 
-**核心关系：**
+**核心关系规则：**
 
-- **外部源是基础，不依赖 LLM。** 外部源有数据就直接用，LLM 只在外部源都缺失时才介入。
-- **LLM 是填充，不覆盖外部源。** LLM 生成的内容 `confidence < 1.0`，优先级低于外部源。查询排序时外部源在前，LLM 在后。
-- **人工是闸门，覆盖一切。** 人工修改（`modified=1`）或人工创建（`source='human'`）的数据优先级最高。人工审核通过（`reviewed=1`）的数据即使源是 LLM 也视为可用。
-- **外部源更新时，人工说了算。** 新版本外部源的数据变化，如果与人工修改冲突，进入 `pending_changes` 等待审批，而不是自动覆盖。
+1. 外部源是基础，LLM 不覆盖外部源已有数据。LLM 只在两外部源都缺失某字段时才介入填充。
+2. 人工是闸门，覆盖一切。人工修改过的数据，外部源更新时进入审批队列而非自动覆写。
+3. LLM 的第二角色是质量评价。对已有数据打分、标记问题，辅助人工审核优先级排序。
 
-**查询优先级（ORDER BY）：**
+### 1.3 数据质量判定
 
+不用浮点数置信度（0.0~1.0 无法操作）。用 `source` + `reviewed` + `modified` 三个离散字段判定：
+
+| 条件 | 质量等级 | 含义 |
+|------|---------|------|
+| `source='human'` 或 `modified=1` | 最高 | 人工创建或修改过 |
+| `source IN ('stardict','wn')` 且 `reviewed=1` | 高 | 外部源数据，人工已确认 |
+| `source IN ('stardict','wn')` 且 `reviewed=0` | 中 | 外部源数据，未审核 |
+| `source='llm'` 且 `reviewed=1` | 中 | AI 生成，人工已确认 |
+| `source='llm'` 且 `reviewed=0` | 低 | AI 生成，未审核 |
+
+查询排序 ORDER BY 规则：
+
+```sql
+ORDER BY
+    CASE WHEN source='human' OR modified=1 THEN 0
+         WHEN source IN ('stardict','wn') AND reviewed=1 THEN 1
+         WHEN source IN ('stardict','wn') AND reviewed=0 THEN 2
+         WHEN source='llm' AND reviewed=1 THEN 3
+         ELSE 4
+    END
 ```
-人工创建/修改  >  外部源+已审核  >  外部源+未审核  >  LLM+已审核  >  LLM+未审核
-```
-
-**核心原则：**
-- **所有数据标注来源和置信度**，查询时不关心数据来自哪个上游。
-- **每个值都可追溯**——谁创建的、是否审核过、是否被人工修改过。
 
 ---
 
-## 表结构
+## 2. 表结构
 
-### words — 单词主表
+### 2.1 表总览
 
-一条记录 = 一个词形 + 可选词性的组合。词性为非必填，stardict 中有部分词条不标注词性。
+| 表 | 用途 | 预估行数 |
+|----|------|---------|
+| words | 单词主表，一个 (word, pos) 一行 | ~200,000 |
+| definitions | 英文定义，一对多 | ~250,000 |
+| translations | 中文翻译，一对多 | ~180,000 |
+| examples | 例句，文本和翻译独立追踪 | ~80,000 |
+| word_relations | 语义关系（同义/反义/上下位/派生） | ~400,000 |
+| word_forms | 词形变化（复数/时态/比较级） | ~100,000 |
+| evaluations | LLM 质量评价记录 | ~变动 |
+| pending_changes | 外部源更新产生的冲突审批队列 | ~0 起步 |
+| change_log | 人工操作审计日志 | ~0 起步 |
+| import_log | 外部源导入运行记录 | ~10/年 |
+
+### 2.2 words — 单词主表
+
+一条记录 = 一个词形 + 可选词性。词性非必填（stardict 部分词条不标词性）。
 
 ```sql
 CREATE TABLE words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word TEXT NOT NULL,           -- 词形 (lemma)，如 "bank"
     pos TEXT,                     -- 词性: n/v/a/r/s，可为 NULL
-    pos_source TEXT,              -- 'stardict' / 'wn' / 'human'
+    pos_source TEXT,              -- 该词性来自哪个源: 'stardict' / 'wn' / 'human'
     phonetic TEXT,                -- 音标 (IPA)
-    phonetic_source TEXT,         -- 'stardict' / 'wn' / 'human'
-    audio TEXT,                   -- 音频文件路径 (来自 stardict)
+    phonetic_source TEXT,         -- 音标来源: 'stardict' / 'wn' / 'human'
+    audio TEXT,                   -- 音频文件路径
     collins INTEGER DEFAULT 0,    -- 柯林斯星级 0-5
     oxford INTEGER DEFAULT 0,     -- 牛津核心词 0/1
     bnc INTEGER,                  -- BNC 词频排名，越小越常用
     frq INTEGER,                  -- COCA 词频排名，越小越常用
-    tag TEXT,                     -- 考试分类标签，逗号分隔: "CET4,CET6,TOEFL"
+    tag TEXT,                     -- 考试分类标签，逗号分隔: "CET4,CET6,TOEFL,IELTS,GRE"
     exchange TEXT,                -- JSON: {"pl":"banks","past":"banked","pp":"banked","ing":"banking","3rd":"banks","comp":"","super":""}
-    detail TEXT,                  -- JSON: stardict detail 原始扩展数据
+    detail TEXT,                  -- JSON: stardict detail 原始扩展数据（保留备用）
     sources TEXT,                 -- 贡献来源，逗号分隔: 'stardict,wn' / 'stardict' / 'wn' / 'human'
-    curated INTEGER NOT NULL DEFAULT 0,  -- 人工是否审核过本条词条 (0/1)
-    curated_at TEXT,              -- 审核时间
+    curated INTEGER NOT NULL DEFAULT 0,  -- 人工是否审核过本条 (0/1)
+    curated_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
 
@@ -81,30 +113,26 @@ CREATE INDEX idx_words_curated ON words(curated);
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
-| word | 所有源共有 | 词形本身，作为主键的一部分 |
-| pos | stardict / wn / human | stardict 部分有，wn 全覆盖，人工可修正 |
-| phonetic | wn > stardict > human | wn IPA 更规范，人工可修正或填写 |
-| audio | stardict > human | |
-| collins | stardict > human | 人工可修正 |
-| oxford | stardict > human | 人工可修正 |
-| bnc | stardict > human | 人工可修正 |
-| frq | stardict > human | 人工可修正 |
-| tag | stardict > human | 人工可添加或修正 |
-| exchange | stardict + wn > human | stardict 为主，wn forms 补充，人工可修正 |
-| detail | stardict | 原始数据，不做人工修改 |
+| word | 所有源共有 | 词形本身 |
+| pos | stardict(部分) / wn(全) / human | wn 的 pos 更完整 |
+| phonetic | wn > stardict > human | wn IPA 更规范 |
+| audio | stardict | wn 理论上也有但极少填充 |
+| collins | stardict | 柯林斯词典独有 |
+| oxford | stardict | 牛津词典独有 |
+| bnc | stardict | 英国国家语料库词频 |
+| frq | stardict | 美国当代英语语料库词频 |
+| tag | stardict | 考试分类标签 |
+| exchange | stardict + wn 补充 | stardict 为主，wn forms 表补充 |
+| detail | stardict | 原始扩展 JSON，不展开 |
+| sources | ETL 自动维护 | 记录哪些上游提供了此词条 |
 
 **curated 语义：**
-- 0 = 未审核。各字段值来自自动 ETL 导入，人工未确认。
-- 1 = 已审核。人工已逐字段检查并通过，或人工手动创建/编辑过本条记录。
+- 0 = 未审核，字段值来自 ETL 自动导入。
+- 1 = 已审核，人工已逐字段检查并确认。人工编辑任意字段时自动置 1。
 
-curated 更新规则：
-- ETL 新插入时 `curated=0`。
-- 人工编辑 words 表任意字段时，自动将 `curated` 置为 1，`curated_at` 置为当前时间。
-- 人工可通过 UI 将 `curated` 复位为 0（表示需要重新审核）。
+### 2.3 definitions — 英文定义
 
-### definitions — 英文定义
-
-一对多，一个词可有多个来源的定义。每行独立追踪来源和审核状态。
+每个词可有多条定义（不同来源的措辞可能不同）。
 
 ```sql
 CREATE TABLE definitions (
@@ -112,11 +140,10 @@ CREATE TABLE definitions (
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,   -- 人工审核通过 (0/1)
-    reviewed_at TEXT,                      -- 审核时间
+    reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,   -- 人工修改过文本 (0/1)
-    modified_at TEXT,                      -- 最后修改时间
+    modified_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
 
@@ -127,38 +154,31 @@ CREATE INDEX idx_definitions_source ON definitions(source);
 CREATE INDEX idx_definitions_reviewed ON definitions(reviewed);
 ```
 
-**审核状态机：**
+**来源说明：**
+
+| source | 导入来源 | 说明 |
+|--------|---------|------|
+| stardict | stardict.definition 字段 | 英文定义，通常简洁 |
+| wn | wn synset definition | 英文定义，通常较完整 |
+| llm | fill_gaps.py | 仅在 stardict 和 wn 都没有时补全 |
+| human | 人工新建 | 人工输入的定义 |
+
+**modified 语义：**
+- 0 = 文本未经人工修改，保持源导入时的原样
+- 1 = 人工编辑过文本内容。`source` 保持不变（记录最初来源），但查询优先级提升到最高
+
+**审核状态迁移：**
 
 ```
-ETL 插入                     人工审核              人工修改文本
-source=wn/stardict/llm  →   reviewed=0       →   reviewed=1
-confidence=0.5~1.0          modified=0            modified=1 (如果改了)
-reviewed=0                  reviewed_at=NULL      reviewed_at=now
-modified=0                                        modified_at=now
-                            ↓ 人工点击"通过"
-                            reviewed=1
-                            reviewed_at=now
-                            modified=0
+ETL 插入 (reviewed=0, modified=0)
+    ├── 人工点击"通过" → reviewed=1, reviewed_at=now, modified=0
+    ├── 人工修改文本   → reviewed=1, reviewed_at=now, modified=1, modified_at=now
+    └── 人工撤回审核   → reviewed=0, reviewed_at=NULL
 ```
 
-**查询时按可信度排序：**
+### 2.4 translations — 中文翻译
 
-```sql
--- 人工数据最优先，其次已审核，再按 confidence 降序
-ORDER BY
-    CASE WHEN source='human' OR modified=1 THEN 0 ELSE 1 END,
-    reviewed DESC,
-    confidence DESC
-```
-
-**设计要点：**
-- `modified=1` 表示人工修改过文本内容。此时 `source` 保持不变（保留原始来源记录），但 `confidence` 应置为 1.0。
-- `reviewed=1` 且 `modified=0` 表示人工看过原文并确认无误。
-- `source='human'` 表示人工从零创建的定义。
-
-### translations — 中文翻译
-
-与 definitions 相同的审核模型。
+与 definitions 结构一致。
 
 ```sql
 CREATE TABLE translations (
@@ -167,7 +187,6 @@ CREATE TABLE translations (
     text TEXT NOT NULL,
     language TEXT NOT NULL DEFAULT 'zh',
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -182,33 +201,36 @@ CREATE INDEX idx_translations_source ON translations(source);
 CREATE INDEX idx_translations_reviewed ON translations(reviewed);
 ```
 
-**设计要点：**
-- stardict.translation 是中文翻译主来源，confidence=1.0。
-- wn 无直接中文翻译，通过 ILI 映射 omw-cmn 中文 lemma，source='wn'，confidence=0.8（因为是词级映射而非翻译）。
-- llm 仅在两源都无时填充，confidence=0.7。
+**来源说明：**
 
-### examples — 例句
+| source | 导入来源 | 说明 |
+|--------|---------|------|
+| stardict | stardict.translation 字段 | 中文翻译主来源 |
+| wn | omw-cmn ILI 映射 | 通过跨语言索引找到的中文 lemma，非直接翻译 |
+| llm | fill_gaps.py | 仅在 stardict 和 wn 都没有时补全 |
+| human | 人工新建 | 人工输入的翻译 |
 
-例句文本和它的中文翻译有**独立**的来源和审核状态。
+### 2.5 examples — 例句
+
+例句的英文文本和中文翻译有**独立**的审核追踪。
 
 ```sql
 CREATE TABLE examples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     text TEXT NOT NULL,                       -- 英文例句文本
-    translation TEXT,                         -- 例句的中文翻译
+    translation TEXT,                         -- 例句的中文翻译（可为 NULL）
+    -- 例句文本的追踪
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
-    reviewed INTEGER NOT NULL DEFAULT 0,       -- 例句文本审核
+    reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
-    modified INTEGER NOT NULL DEFAULT 0,       -- 例句文本被人工修改
+    modified INTEGER NOT NULL DEFAULT 0,
     modified_at TEXT,
-    -- 翻译的独立来源追踪
+    -- 翻译的独立追踪
     trans_source TEXT CHECK(trans_source IN ('stardict', 'wn', 'llm', 'human')),
-    trans_confidence REAL DEFAULT 1.0 CHECK(trans_confidence >= 0 AND trans_confidence <= 1),
-    trans_reviewed INTEGER NOT NULL DEFAULT 0, -- 翻译审核
+    trans_reviewed INTEGER NOT NULL DEFAULT 0,
     trans_reviewed_at TEXT,
-    trans_modified INTEGER NOT NULL DEFAULT 0, -- 翻译被人修改
+    trans_modified INTEGER NOT NULL DEFAULT 0,
     trans_modified_at TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
@@ -220,22 +242,36 @@ CREATE INDEX idx_examples_source ON examples(source);
 CREATE INDEX idx_examples_reviewed ON examples(reviewed);
 ```
 
-**设计要点：**
-- `source/confidence/reviewed/modified` 追踪英文例句文本。
-- `trans_source/trans_confidence/trans_reviewed/trans_modified` 独立追踪中文翻译。
-- 例句和翻译可来自不同源。例如：例句来自 wn（source='wn'），翻译来自 LLM（trans_source='llm', trans_confidence=0.7）。
-- `translation IS NULL` 时，trans_* 字段无意义（忽略）。
+**独立追踪的含义：**
 
-### word_relations — 语义关系
+同一例句行，英文文本和中文翻译可能来自不同源、分别审核：
+
+```
+例句行: word_id=1
+  text="He cashed a check at the bank"    source='wn',     reviewed=1  (人工已确认)
+  translation="他在银行兑现了支票"          trans_source='llm', trans_reviewed=0  (AI翻译，未审核)
+```
+
+**来源说明：**
+
+| source | 导入来源 |
+|--------|---------|
+| stardict | stardict detail JSON 中解析的例句 |
+| wn | wn synset_examples 表 |
+| llm | fill_gaps.py 生成的例句 |
+| human | 人工新建的例句 |
+
+### 2.6 word_relations — 语义关系
+
+统一存储所有词间语义关系，不区分 synset 级和 sense 级。
 
 ```sql
 CREATE TABLE word_relations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word TEXT NOT NULL,   -- 关联词形 (lemma)，非 words.id
-    relation_type TEXT NOT NULL,  -- synonym/antonym/hypernym/hyponym/derivation/similar/...
+    relation_type TEXT NOT NULL,  -- 关系类型
     source TEXT NOT NULL DEFAULT 'wn' CHECK(source IN ('wn', 'stardict', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -251,12 +287,35 @@ CREATE INDEX idx_relations_type ON word_relations(relation_type);
 CREATE INDEX idx_relations_reviewed ON word_relations(reviewed);
 ```
 
-**设计要点：**
-- `related_word` 存词形文本而非 words.id，因为关联词可能不在本地词库中。
-- wn synset_relations 导入时展开：synset A {bank, depository} —hypernym→ synset B {institution}，展开为 bank→institution、depository→institution 两条关系。
-- 人工可添加关系（source='human'），或删除关系（物理删除行）。
+**关系类型（relation_type）完整列表：**
 
-### word_forms — 词形变化
+| 类别 | 类型 | 含义 |
+|------|------|------|
+| 同义/反义 | synonym | 同义词 |
+| | antonym | 反义词 |
+| | similar | 近似词 |
+| 上下位 | hypernym | 上位词 (is-a) |
+| | hyponym | 下位词 |
+| | instance_hypernym | 实例上位词 |
+| | instance_hyponym | 实例下位词 |
+| 整体部分 | holo_part / mero_part | 整体-部分 |
+| | holo_member / mero_member | 整体-成员 |
+| | holo_substance / mero_substance | 整体-物质 |
+| 因果 | causes / is_caused_by | 导致/被导致 |
+| 蕴含 | entails / is_entailed_by | 蕴含/被蕴含 |
+| 派生 | derivation | 派生关系 (run → runner) |
+| | participle | 分词关系 |
+| | pertainym | 相关形容词 (sun → solar) |
+| 领域 | domain_region / has_domain_region | 地域领域 |
+| | domain_topic / has_domain_topic | 主题领域 |
+| 其他 | also, attribute, exemplifies, is_exemplified_by, other | 参见、属性、例证等 |
+
+**设计要点：**
+- `related_word` 存词形文本而非 words.id，因为关联词可能不在本地词库中。查询时 `JOIN words ON word_relations.related_word = words.word`。
+- wn 的 synset_relations 导入时展开：synset A {bank, depository} —hypernym→ synset B {institution}，展开为 bank→institution 和 depository→institution 两条关系。
+- 关系是单向的。双向关系（如 synonym）在导入时写两行（A→B 和 B→A）。
+
+### 2.7 word_forms — 词形变化
 
 ```sql
 CREATE TABLE word_forms (
@@ -268,7 +327,6 @@ CREATE TABLE word_forms (
         'third_person', 'comparative', 'superlative'
     )),
     source TEXT NOT NULL DEFAULT 'stardict' CHECK(source IN ('stardict', 'wn', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -281,15 +339,125 @@ CREATE TABLE word_forms (
 CREATE INDEX idx_wordforms_word ON word_forms(word_id);
 ```
 
-### change_log — 变更审计
+**form_type 与 stardict exchange JSON key 的映射：**
 
-记录所有人工操作的审计日志。ETL 自动导入不记日志（避免膨胀）。
+| exchange key | form_type | 示例 |
+|-------------|-----------|------|
+| pl | plural | banks |
+| past | past | banked |
+| pp | past_participle | banked |
+| ing | present_participle | banking |
+| 3rd | third_person | banks |
+| comp | comparative | bigger |
+| super | superlative | biggest |
+
+### 2.8 evaluations — LLM 质量评价
+
+LLM 对已有数据打分，辅助人工审核优先级排序。LLM 不直接改数据，评价结果写入此表。
+
+```sql
+CREATE TABLE evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 评价目标
+    target_table TEXT NOT NULL,    -- 'definitions' / 'translations' / 'examples' / 'word_relations'
+    target_id INTEGER NOT NULL,    -- 目标表中的行 ID
+    word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+    -- 评价内容
+    dimension TEXT NOT NULL,       -- 评价维度
+    score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),  -- 1=严重问题, 5=完美
+    comment TEXT,                  -- 评价说明（LLM 给出的理由）
+    -- 建议
+    suggestion TEXT,               -- LLM 建议的修正值（如有）
+    severity TEXT NOT NULL DEFAULT 'info' CHECK(severity IN ('critical', 'warning', 'info')),
+    -- 状态
+    reviewed INTEGER NOT NULL DEFAULT 0,  -- 人工是否已处理此评价 (0/1)
+    reviewed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_evaluations_target ON evaluations(target_table, target_id);
+CREATE INDEX idx_evaluations_word ON evaluations(word_id);
+CREATE INDEX idx_evaluations_score ON evaluations(score);
+CREATE INDEX idx_evaluations_reviewed ON evaluations(reviewed);
+```
+
+**评价维度：**
+
+| dimension | 适用表 | 评估内容 |
+|-----------|--------|---------|
+| translation_accuracy | translations | 中文翻译是否准确对应英文定义 |
+| definition_completeness | definitions | 定义是否过简或过泛 |
+| example_naturalness | examples | 例句是否地道 |
+| cross_source_consistency | definitions + translations | stardict 和 wn 对同一词的定义/翻译是否矛盾 |
+| relation_accuracy | word_relations | 语义关系是否正确 |
+| form_correctness | word_forms | 词形变化是否正确 |
+
+**severity 语义：**
+
+| severity | 含义 | 人工处理建议 |
+|----------|------|------------|
+| critical | 明显错误，必须修正 | 优先处理 |
+| warning | 可能有问题，建议复查 | 有空处理 |
+| info | 参考信息 | 可选 |
+
+**工作流：**
+
+```
+LLM 评价 → 写入 evaluations (reviewed=0)
+    → 人工按 severity + score 排序，优先看 critical
+    → 人工判断：同意评价 → 修改目标数据 + 标记 evaluations.reviewed=1
+                 不同意   → 直接标记 evaluations.reviewed=1（跳过）
+```
+
+### 2.9 pending_changes — 数据源更新冲突队列
+
+外部源更新时，与人工修改冲突的数据不自动覆写，而是进入此队列等待审批。
+
+```sql
+CREATE TABLE pending_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,     -- 目标表
+    row_id INTEGER,               -- 目标表中已有行的 ID；NULL 表示源新增了整行待确认
+    word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+    field TEXT,                   -- 字段名 (仅 words 表使用，附属表为 NULL 表示整行)
+    old_value TEXT,               -- dict.db 当前值
+    new_value TEXT,               -- 新数据源建议值
+    source TEXT NOT NULL CHECK(source IN ('stardict', 'wn')),
+    import_log_id INTEGER REFERENCES import_log(id),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+    resolved_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_pending_word ON pending_changes(word_id);
+CREATE INDEX idx_pending_status ON pending_changes(status);
+```
+
+**与各表的对应关系：**
+
+| table_name | row_id | field | 含义示例 |
+|------------|--------|-------|---------|
+| definitions | 123 | NULL | 定义行 id=123 的 text 在源中变了，但人工曾改过 |
+| translations | 456 | NULL | 翻译行 id=456 的 text 在源中变了 |
+| examples | 789 | NULL | 例句行 id=789 的 text 在源中变了 |
+| words | 10 | collins | 词条 id=10 的 collins 从 3 变为 4 |
+| words | 10 | phonetic | 词条 id=10 的音标变了 |
+| word_relations | 55 | NULL | 关系行 id=55 的文本在源中变了 |
+
+**审批流程：**
+
+```
+pending (默认)
+    ├── 人工通过     → approved,   applied to target table
+    ├── 人工调整后通过 → approved,   applied with manual edit
+    └── 人工拒绝     → rejected,   target table unchanged
+```
+
+### 2.10 change_log — 人工操作审计
 
 ```sql
 CREATE TABLE change_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    table_name TEXT NOT NULL,     -- 'words' / 'definitions' / 'translations' / 'examples' / 'word_relations' / 'word_forms'
-    row_id INTEGER NOT NULL,      -- 该表中的行 ID
+    table_name TEXT NOT NULL,     -- 目标表
+    row_id INTEGER NOT NULL,      -- 目标行 ID
     field TEXT,                   -- 被修改的字段名；NULL 表示整行操作
     old_value TEXT,               -- 旧值；NULL 表示新建
     new_value TEXT,               -- 新值；NULL 表示删除
@@ -300,51 +468,42 @@ CREATE INDEX idx_changelog_table_row ON change_log(table_name, row_id);
 CREATE INDEX idx_changelog_changed_at ON change_log(changed_at);
 ```
 
-**action 含义：**
-- `create` — 人工新建一行（source='human'）
-- `update` — 人工修改了某个字段的值
-- `delete` — 人工删除了一行
-- `review` — 人工将 reviewed 置为 1
-- `unreview` — 人工将 reviewed 置为 0
+ETL 自动导入不记日志（避免膨胀）。仅人工操作时写入。
 
-### pending_changes — 数据源更新冲突队列
-
-当外部数据源更新后，如果某行已被人工修改过，新数据不直接覆写，而是生成一条待审批记录。
+### 2.11 import_log — 外部源导入记录
 
 ```sql
-CREATE TABLE pending_changes (
+CREATE TABLE import_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    table_name TEXT NOT NULL,     -- 目标表: 'words' / 'definitions' / 'translations' / 'examples' / 'word_relations' / 'word_forms'
-    row_id INTEGER,               -- 目标表中已有行的 ID；NULL 表示源新增了整行待确认
-    word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
-    field TEXT,                   -- 字段名 (仅 words 表使用，附属表为 NULL 表示整行)
-    old_value TEXT,               -- dict.db 当前值
-    new_value TEXT,               -- 新数据源建议值
-    source TEXT NOT NULL,         -- 哪个数据源触发的: 'stardict' / 'wn'
-    import_log_id INTEGER REFERENCES import_log(id),
-    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
-    resolved_at TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+    source TEXT NOT NULL CHECK(source IN ('stardict', 'wn')),
+    source_version TEXT,          -- 源版本标识 (stardict=SHA256, wn=版本号如'2025+')
+    mode TEXT NOT NULL CHECK(mode IN ('full', 'incremental')),
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    new_words INTEGER DEFAULT 0,
+    updated_words INTEGER DEFAULT 0,
+    new_definitions INTEGER DEFAULT 0,
+    updated_definitions INTEGER DEFAULT 0,
+    new_translations INTEGER DEFAULT 0,
+    updated_translations INTEGER DEFAULT 0,
+    new_examples INTEGER DEFAULT 0,
+    updated_examples INTEGER DEFAULT 0,
+    new_relations INTEGER DEFAULT 0,
+    updated_relations INTEGER DEFAULT 0,
+    new_forms INTEGER DEFAULT 0,
+    updated_forms INTEGER DEFAULT 0,
+    conflicts INTEGER DEFAULT 0,  -- 产生的 pending_changes 数量
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
+    error TEXT
 );
-CREATE INDEX idx_pending_word ON pending_changes(word_id);
-CREATE INDEX idx_pending_status ON pending_changes(status);
 ```
 
-**与附属表的对应关系：**
-
-| table_name | row_id | field | 含义 |
-|------------|--------|-------|------|
-| definitions | 123 | NULL | 定义行 id=123 的 text 被源更新，但人工曾修改过 |
-| translations | 456 | NULL | 翻译行 id=456 的 text 被源更新，但人工曾修改过 |
-| examples | 789 | NULL | 例句行 id=789 的 text 被源更新，但人工曾修改过 |
-| words | 10 | collins | 词条 id=10 的 collins 从 3 变为 4 |
-| words | 10 | phonetic | 词条 id=10 的 phonetic 从 /a/ 变为 /b/ |
-| word_relations | 55 | NULL | 关系行 id=55 被源更新 |
-
-### 完整建表 SQL
+### 2.12 完整建表 SQL
 
 ```sql
+-- ============================================================
 -- 单词主表
+-- ============================================================
 CREATE TABLE words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word TEXT NOT NULL,
@@ -374,13 +533,14 @@ CREATE INDEX idx_words_bnc ON words(bnc);
 CREATE INDEX idx_words_frq ON words(frq);
 CREATE INDEX idx_words_curated ON words(curated);
 
+-- ============================================================
 -- 英文定义
+-- ============================================================
 CREATE TABLE definitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -393,14 +553,15 @@ CREATE INDEX idx_definitions_word ON definitions(word_id);
 CREATE INDEX idx_definitions_source ON definitions(source);
 CREATE INDEX idx_definitions_reviewed ON definitions(reviewed);
 
+-- ============================================================
 -- 中文翻译
+-- ============================================================
 CREATE TABLE translations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     language TEXT NOT NULL DEFAULT 'zh',
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -413,20 +574,20 @@ CREATE INDEX idx_translations_word ON translations(word_id);
 CREATE INDEX idx_translations_source ON translations(source);
 CREATE INDEX idx_translations_reviewed ON translations(reviewed);
 
+-- ============================================================
 -- 例句
+-- ============================================================
 CREATE TABLE examples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     text TEXT NOT NULL,
     translation TEXT,
     source TEXT NOT NULL CHECK(source IN ('stardict', 'wn', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
     modified_at TEXT,
     trans_source TEXT CHECK(trans_source IN ('stardict', 'wn', 'llm', 'human')),
-    trans_confidence REAL DEFAULT 1.0 CHECK(trans_confidence >= 0 AND trans_confidence <= 1),
     trans_reviewed INTEGER NOT NULL DEFAULT 0,
     trans_reviewed_at TEXT,
     trans_modified INTEGER NOT NULL DEFAULT 0,
@@ -439,14 +600,15 @@ CREATE INDEX idx_examples_word ON examples(word_id);
 CREATE INDEX idx_examples_source ON examples(source);
 CREATE INDEX idx_examples_reviewed ON examples(reviewed);
 
+-- ============================================================
 -- 语义关系
+-- ============================================================
 CREATE TABLE word_relations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word TEXT NOT NULL,
     relation_type TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'wn' CHECK(source IN ('wn', 'stardict', 'llm', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -460,7 +622,9 @@ CREATE INDEX idx_relations_related ON word_relations(related_word);
 CREATE INDEX idx_relations_type ON word_relations(relation_type);
 CREATE INDEX idx_relations_reviewed ON word_relations(reviewed);
 
+-- ============================================================
 -- 词形变化
+-- ============================================================
 CREATE TABLE word_forms (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
@@ -470,7 +634,6 @@ CREATE TABLE word_forms (
         'third_person', 'comparative', 'superlative'
     )),
     source TEXT NOT NULL DEFAULT 'stardict' CHECK(source IN ('stardict', 'wn', 'human')),
-    confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0 AND confidence <= 1),
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_at TEXT,
     modified INTEGER NOT NULL DEFAULT 0,
@@ -481,45 +644,31 @@ CREATE TABLE word_forms (
 );
 CREATE INDEX idx_wordforms_word ON word_forms(word_id);
 
--- 变更审计
-CREATE TABLE change_log (
+-- ============================================================
+-- LLM 质量评价
+-- ============================================================
+CREATE TABLE evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    table_name TEXT NOT NULL,
-    row_id INTEGER NOT NULL,
-    field TEXT,
-    old_value TEXT,
-    new_value TEXT,
-    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'review', 'unreview')),
-    changed_at TEXT DEFAULT (datetime('now'))
+    target_table TEXT NOT NULL,
+    target_id INTEGER NOT NULL,
+    word_id INTEGER NOT NULL REFERENCES words(id) ON DELETE CASCADE,
+    dimension TEXT NOT NULL,
+    score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),
+    comment TEXT,
+    suggestion TEXT,
+    severity TEXT NOT NULL DEFAULT 'info' CHECK(severity IN ('critical', 'warning', 'info')),
+    reviewed INTEGER NOT NULL DEFAULT 0,
+    reviewed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
 );
-CREATE INDEX idx_changelog_table_row ON change_log(table_name, row_id);
-CREATE INDEX idx_changelog_changed_at ON change_log(changed_at);
+CREATE INDEX idx_evaluations_target ON evaluations(target_table, target_id);
+CREATE INDEX idx_evaluations_word ON evaluations(word_id);
+CREATE INDEX idx_evaluations_score ON evaluations(score);
+CREATE INDEX idx_evaluations_reviewed ON evaluations(reviewed);
 
--- 导入运行记录
-CREATE TABLE import_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT NOT NULL CHECK(source IN ('stardict', 'wn')),
-    source_version TEXT,          -- 源数据版本标识 (如 stardict 的文件 hash, wn 的版本号)
-    mode TEXT NOT NULL CHECK(mode IN ('full', 'incremental')),
-    started_at TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at TEXT,
-    new_words INTEGER DEFAULT 0,  -- 新增词条数
-    updated_words INTEGER DEFAULT 0,
-    new_definitions INTEGER DEFAULT 0,
-    updated_definitions INTEGER DEFAULT 0,
-    new_translations INTEGER DEFAULT 0,
-    updated_translations INTEGER DEFAULT 0,
-    new_examples INTEGER DEFAULT 0,
-    updated_examples INTEGER DEFAULT 0,
-    new_relations INTEGER DEFAULT 0,
-    updated_relations INTEGER DEFAULT 0,
-    new_forms INTEGER DEFAULT 0,
-    updated_forms INTEGER DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
-    error TEXT                   -- 错误信息
-);
-
+-- ============================================================
 -- 数据源更新冲突队列
+-- ============================================================
 CREATE TABLE pending_changes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     table_name TEXT NOT NULL,
@@ -536,23 +685,69 @@ CREATE TABLE pending_changes (
 );
 CREATE INDEX idx_pending_word ON pending_changes(word_id);
 CREATE INDEX idx_pending_status ON pending_changes(status);
+
+-- ============================================================
+-- 人工操作审计
+-- ============================================================
+CREATE TABLE change_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_name TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    field TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    action TEXT NOT NULL CHECK(action IN ('create', 'update', 'delete', 'review', 'unreview')),
+    changed_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_changelog_table_row ON change_log(table_name, row_id);
+CREATE INDEX idx_changelog_changed_at ON change_log(changed_at);
+
+-- ============================================================
+-- 导入运行记录
+-- ============================================================
+CREATE TABLE import_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL CHECK(source IN ('stardict', 'wn')),
+    source_version TEXT,
+    mode TEXT NOT NULL CHECK(mode IN ('full', 'incremental')),
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    new_words INTEGER DEFAULT 0,
+    updated_words INTEGER DEFAULT 0,
+    new_definitions INTEGER DEFAULT 0,
+    updated_definitions INTEGER DEFAULT 0,
+    new_translations INTEGER DEFAULT 0,
+    updated_translations INTEGER DEFAULT 0,
+    new_examples INTEGER DEFAULT 0,
+    updated_examples INTEGER DEFAULT 0,
+    new_relations INTEGER DEFAULT 0,
+    updated_relations INTEGER DEFAULT 0,
+    new_forms INTEGER DEFAULT 0,
+    updated_forms INTEGER DEFAULT 0,
+    conflicts INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed')),
+    error TEXT
+);
 ```
 
 ---
 
-## ETL 流程
+## 3. ETL 导入流程
 
-### 总体顺序
+### 3.1 总体流水线
 
 ```
-1. import_stardict.py   → words + definitions + translations + examples + word_forms
-2. import_wn.py         → 合并 words + definitions + translations + examples + word_forms + word_relations
-3. fill_gaps.py         → LLM 补全 translations + examples.translation + definitions
+1. import_stardict.py   →  words + definitions + translations + examples + word_forms
+2. import_wn.py         →  合并 words + definitions + translations + examples + word_forms + word_relations
+3. fill_gaps.py         →  LLM 补全 translations + examples.translation + definitions + examples.text
+4. evaluate.py          →  LLM 评价已有数据质量，写入 evaluations
 ```
 
-第二步是"合并"而非"插入"——wn 中已存在于 words 的词形，更新补充字段，不新增行。wn 独有的词形（stardict 没有的），新增行。
+第二步是"合并"模式——wn 中已存在的词条更新补充字段，不新增重复行；wn 独有的词条新增。
 
-### 字段合并优先级
+### 3.2 字段导入优先级
+
+合并时，**高优先级源可以覆盖低优先级源的数据**（仅限未人工审核的行）。
 
 | 字段 | 优先级 | 说明 |
 |------|--------|------|
@@ -564,78 +759,84 @@ CREATE INDEX idx_pending_status ON pending_changes(status);
 | bnc | stardict only | |
 | frq | stardict only | |
 | tag | stardict only | |
-| exchange | stardict > wn | stardict 为主，wn forms 补充缺失 |
+| exchange | stardict(主) + wn(补) | stardict 为主，wn forms 表补充缺失 |
 | detail | stardict only | |
 
-合并时遵循规则：**已有值不被覆盖，除非新源优先级更高。** 已人工审核（curated=1）的 words 行，ETL 不再修改任何字段。
+合并规则：
+- **已有值不被覆盖**，除非新源优先级更高。
+- **curated=1 的 words 行**，任何 ETL 都不修改其字段。
+- **reviewed=1 或 modified=1 的附属表行**，ETL 不覆写，差异进入 pending_changes。
 
-### import_stardict.py 逻辑
+### 3.3 import_stardict.py
 
 ```
 for each row in stardict:
-    1. 解析 exchange JSON → 暂存
-    2. 确定 pos:
+    1. 确定 pos:
        - stardict.pos 有值 → pos = stardict.pos, pos_source = 'stardict'
        - stardict.pos 为空 → pos = NULL, pos_source = NULL
-    3. INSERT OR IGNORE INTO words (
-         word, pos, pos_source,
-         phonetic, phonetic_source='stardict',
-         audio,
-         collins, oxford, bnc, frq, tag,
-         exchange, detail
-       )
-       ON CONFLICT(word, pos) DO NOTHING  -- ETL 阶段不覆盖已有数据
-    4. SELECT id FROM words WHERE word=? AND (pos=? OR pos IS NULL) → word_id
-    5. definition 非空:
-       INSERT OR IGNORE INTO definitions (word_id, text, source='stardict', reviewed=0, modified=0)
-    6. translation 非空:
-       INSERT OR IGNORE INTO translations (word_id, text, source='stardict', reviewed=0, modified=0)
-    7. 解析 detail JSON 中的例句:
-       - 如有例句文本:
-         INSERT OR IGNORE INTO examples (word_id, text, translation=例句中文翻译或NULL,
-           source='stardict',
+
+    2. 插入或获取 words:
+       INSERT OR IGNORE INTO words (word, pos, pos_source, phonetic, phonetic_source='stardict',
+           audio, collins, oxford, bnc, frq, tag, exchange, detail, sources='stardict')
+       SELECT id FROM words WHERE word=? AND (pos=? OR pos IS NULL) → word_id
+
+    3. definition 非空:
+       INSERT OR IGNORE INTO definitions (word_id, text, source='stardict')
+
+    4. translation 非空:
+       INSERT OR IGNORE INTO translations (word_id, text, source='stardict')
+
+    5. 解析 detail JSON 中的例句:
+       - 如有例句:
+         INSERT OR IGNORE INTO examples (word_id, text, translation=中文翻译或NULL, source='stardict',
            trans_source='stardict' IF translation NOT NULL ELSE NULL)
-    8. 展开 exchange JSON:
+
+    6. 展开 exchange JSON:
        for each key in exchange:
-         INSERT OR IGNORE INTO word_forms (word_id, form=value, form_type=mapped, source='stardict')
+         form_type = EXCHANGE_MAP[key]
+         INSERT OR IGNORE INTO word_forms (word_id, form=value, form_type, source='stardict')
 ```
 
-### import_wn.py 逻辑
+### 3.4 import_wn.py
 
 ```
 # 阶段 1: 导入词形
 for each lexicon in wn (oewn, omw-cmn):
-    for each entry e in lexicon.entries:
+    for each entry e where e.pos in (n, v, a, r, s):
         for each form f in e.forms where f.rank = 0 (只取 lemma):
             word = f.form
             pos = e.pos
 
-            existing = SELECT id, curated, pos, pos_source, phonetic
-                       FROM words WHERE word = ? AND (pos = ? OR pos IS NULL)
+            existing = SELECT * FROM words WHERE word=? AND (pos=? OR pos IS NULL)
 
             if existing:
-                # 不覆盖已人工审核的行
-                if existing.curated: skip to next
+                if existing.curated: continue   # 已审核，不碰
+
+                # 补全 sources
+                if 'wn' NOT IN existing.sources:
+                    UPDATE words SET sources = sources || ',wn'
 
                 # 补全 pos (如果原为空)
                 if existing.pos IS NULL:
-                    UPDATE words SET pos=?, pos_source='wn' WHERE id=?
+                    UPDATE words SET pos=?, pos_source='wn'
 
                 # 补全 phonetic (如果原为空，且 wn 有发音)
                 if existing.phonetic IS NULL:
-                    pronunciation = lookup pronunciations for this form
-                    if pronunciation:
-                        UPDATE words SET phonetic=?, phonetic_source='wn' WHERE id=?
+                    prons = fetch pronunciations for this form
+                    if prons:
+                        UPDATE words SET phonetic=best_pron(prons), phonetic_source='wn'
             else:
-                pronunciation = lookup pronunciations for this form
+                prons = fetch pronunciations for this form
                 INSERT INTO words (word, pos, pos_source='wn',
-                    phonetic=pronunciation.value, phonetic_source='wn')
+                    phonetic=best_pron(prons), phonetic_source='wn' if prons else NULL,
+                    sources='wn')
+
             word_id = resolved
 
-# 阶段 2: 导入定义和例句
+# 阶段 2: 导入定义和例句 (仅英文 oewn)
 for each synset s in oewn:
-    for each word w in s.words:
-        word_id = resolve words row for w
+    words_in_synset = resolve all word_ids for s.words
+    for each word_id in words_in_synset:
         if s.definition:
             INSERT OR IGNORE INTO definitions (word_id, text=s.definition, source='wn')
         for each example in s.examples:
@@ -650,7 +851,14 @@ for each synset s_cmn in omw-cmn:
         for each word w in s_en.words:
             word_id = resolve words row for w
             for each cw in chinese_words:
-                INSERT OR IGNORE INTO translations (word_id, text=cw, source='wn', confidence=0.8)
+                INSERT OR IGNORE INTO translations (word_id, text=cw, source='wn')
+    else:
+        # 中文 synset 独有概念 (无英文对应)
+        # 将中文 lemma 作为独立 words 行
+        for each word w in s_cmn.words:
+            INSERT OR IGNORE INTO words (word, pos=s_cmn.pos, pos_source='wn', sources='wn')
+            if s_cmn.definition:
+                INSERT OR IGNORE INTO definitions (word_id, text=s_cmn.definition, source='wn')
 
 # 阶段 4: 导入语义关系
 for each synset_relation sr:
@@ -659,13 +867,15 @@ for each synset_relation sr:
     target_words = all lemmas in target synset
     for each sw in source_words:
         for each tw in target_words:
-            INSERT OR IGNORE INTO word_relations (word_id, related_word=tw, relation_type=type, source='wn')
+            if sw != tw:  # 避免自己指向自己
+                INSERT OR IGNORE INTO word_relations (word_id, related_word=tw, relation_type=type, source='wn')
 
 for each sense_relation sr:
     type = relation_types[sr.type_rowid].type
     source_word = lemma of source sense's entry
     target_word = lemma of target sense's entry
-    INSERT OR IGNORE INTO word_relations (word_id, related_word=target_word, relation_type=type, source='wn')
+    if source_word != target_word:
+        INSERT OR IGNORE INTO word_relations (word_id, related_word=target_word, relation_type=type, source='wn')
 
 # 阶段 5: 补充词形变化
 for each form f where f.rank > 0:
@@ -675,336 +885,347 @@ for each form f where f.rank > 0:
     INSERT OR IGNORE INTO word_forms (word_id, form=f.form, form_type, source='wn')
 ```
 
-### fill_gaps.py 逻辑 (LLM 补全)
+### 3.5 导入模式：首次 vs 重导
+
+`INSERT OR IGNORE` 的 UNIQUE 约束只能防止**完全相同的行**被重复插入，但数据源更新后同一 (word_id, source) 的文本可能变化（如定义从 "X" 变为 "Y"），此时 `INSERT OR IGNORE` 会同时保留新旧两行——这是错误的。
+
+因此导入逻辑分三种情况处理，首次导入和重导使用同一套逻辑：
 
 ```
-BATCH_SIZE = 50
+for each source_row in source:
+    # 1. 同源匹配：找 dict.db 中同 word_id + 同 source 的行
+    same_source = SELECT * FROM {table} WHERE word_id=? AND source=?
 
-for each word_id in words:
-    # 1. 补翻译
-    existing_tr = SELECT COUNT(*) FROM translations WHERE word_id = ?
-    if existing_tr == 0:
-        enqueue_llm_task(
-            type='translate',
-            word_id=word_id,
-            prompt="Translate '{word}' into Chinese. Return only the Chinese translation."
-        )
-
-    # 2. 补例句中文翻译
-    for each example in SELECT * FROM examples WHERE word_id = ? AND translation IS NULL:
-        enqueue_llm_task(
-            type='example_translation',
-            example_id=example.id,
-            prompt="Translate to Chinese: '{example.text}'"
-        )
-
-    # 3. 补定义 (仅当完全无定义时)
-    existing_def = SELECT COUNT(*) FROM definitions WHERE word_id = ?
-    if existing_def == 0:
-        enqueue_llm_task(
-            type='define',
-            word_id=word_id,
-            prompt="Define '{word}' in English. One concise sentence."
-        )
-
-# 批量执行 LLM 任务
-for batch in chunks(tasks, BATCH_SIZE):
-    responses = call_llm_batch(batch)
-    for resp in responses:
-        if resp.type == 'translate':
-            INSERT OR IGNORE INTO translations (word_id, text, source='llm', confidence=0.7)
-        elif resp.type == 'example_translation':
-            UPDATE examples SET
-                translation = resp.text,
-                trans_source = 'llm',
-                trans_confidence = 0.7
-            WHERE id = resp.example_id
-        elif resp.type == 'define':
-            INSERT OR IGNORE INTO definitions (word_id, text, source='llm', confidence=0.5)
+    if same_source:
+        if same_source.text == source_row.text:
+            # 情况1: 文本未变 → 跳过
+            continue
+        else:
+            # 情况2: 文本变了 → 更新或冲突
+            if same_source.modified == 0 AND same_source.reviewed == 0:
+                UPDATE {table} SET text=?, updated_at=now() WHERE id=same_source.id
+            else:
+                INSERT OR IGNORE INTO pending_changes (...)
+    else:
+        # 情况3: 无同源匹配 → 全新数据，直接插入
+        INSERT OR IGNORE INTO {table} (word_id, text, source, ...)
 ```
 
-**LLM 调用策略：**
-- 批量执行，每批 50 条，减少 API 往返。
-- `confidence`：翻译 0.7，例句翻译 0.7，定义 0.5（定义质量不如翻译可靠）。
-- `reviewed=0, modified=0` 插入，等待人工审核。
-- 同一词条的重复任务自动去重（已有数据后不再补全）。
-- fill_gaps 幂等：可重复运行，已有数据的行自动跳过。
-- 前端展示：`reviewed=0 AND source='llm'` 的内容标注 "(AI 未审核)"；`reviewed=1 AND source='llm'` 标注 "(AI 已审核)"。
+**首次导入时**，dict.db 为空，所有行都走情况3（无同源匹配），直接插入。
 
-### ETL 幂等性保证
+**重导时**，已存在的行走情况1（跳过）或情况2（更新/冲突）。三种情况覆盖了所有场景。
 
-所有 ETL 脚本可重复运行，不会产生重复数据：
-- words: `UNIQUE(word, pos)` + `INSERT OR IGNORE`
-- definitions/translations/examples: `UNIQUE(word_id, text)` + `INSERT OR IGNORE`
-- word_relations: `UNIQUE(word_id, related_word, relation_type)` + `INSERT OR IGNORE`
-- word_forms: `UNIQUE(word_id, form, form_type)` + `INSERT OR IGNORE`
-- ETL 不修改 `curated=1` 的 words 行
-- ETL 不修改 `reviewed=1` 或 `modified=1` 的附属表行
+详细冲突检测逻辑见第 5 章。
 
 ---
 
-## 数据源更新与冲突处理
+## 4. LLM 角色
 
-### 核心规则
+LLM 在系统中有两个独立角色：**内容生成**（填充数据）和 **质量评价**（审核数据）。两者不混在一条流水线中。
 
-| 行状态 | 行为 |
-|--------|------|
-| 未人工修改 (`modified=0`, `reviewed=0`, `curated=0`) | **直接覆写** |
-| 已人工修改 (`modified=1` 或 `reviewed=1` 或 `curated=1`) | **生成 pending_change，等待人工审批** |
-| 源中新增的数据 | **直接插入** |
+### 4.1 角色 A: 内容生成 (fill_gaps.py)
 
-### 场景
+**触发时机：** ETL 导入完成后立即执行。
 
-外部数据源（stardict.db、wn.db）可能以两种方式更新：
+**原则：** 只在外部源都没提供数据时才生成。已有外部源数据的字段，LLM 不碰。
 
-| 场景 | 触发条件 | 策略 |
-|------|---------|------|
-| 全量替换 | 源 DB 文件被新版替换（如 stardict 新版发布） | 全量重导 |
-| 增量追加 | 源 DB 在原基础上新增词条（如 wn 版本升级新增 synset） | 增量导入 |
+```python
+def fill_gaps():
+    for each word in words:
+        # 1. 补中文翻译
+        if SELECT COUNT(*) FROM translations WHERE word_id = word.id == 0:
+            result = llm(f"Translate '{word.word}' ({word.pos}) into Chinese. "
+                         "Provide only the Chinese translation, comma-separated if multiple.")
+            INSERT INTO translations (word_id, text, source='llm', reviewed=0)
+            # 如果生成了多个翻译，插多行
 
-两种模式通过导入脚本的命令行参数控制：
+        # 2. 补英文定义
+        if SELECT COUNT(*) FROM definitions WHERE word_id = word.id == 0:
+            result = llm(f"Define '{word.word}' ({word.pos}) in English. "
+                         "One concise sentence.")
+            INSERT INTO definitions (word_id, text, source='llm', reviewed=0)
+
+        # 3. 补例句
+        if SELECT COUNT(*) FROM examples WHERE word_id = word.id == 0:
+            result = llm(f"Write 2-3 example sentences using '{word.word}' ({word.pos}). "
+                         "Return one sentence per line.")
+            for each sentence in result:
+                INSERT INTO examples (word_id, text=sentence, source='llm', reviewed=0)
+
+        # 4. 补例句中文翻译
+        for each example in SELECT * FROM examples WHERE word_id = word.id AND translation IS NULL:
+            result = llm(f"Translate to Chinese: '{example.text}'")
+            UPDATE examples SET translation=result, trans_source='llm', trans_reviewed=0
+            WHERE id = example.id
+```
+
+**可选扩展（未来启用）：**
+
+```python
+        # 5. 补用法说明
+        if not has_usage_note(word.id):
+            result = llm(f"Describe the usage and common collocations of '{word.word}' ({word.pos}).")
+            INSERT INTO usage_notes (word_id, text, source='llm', reviewed=0)
+
+        # 6. 补近义词辨析
+        synonyms = get_synonyms(word.id)
+        if synonyms and not has_differentiation(word.id):
+            result = llm(f"Differentiate '{word.word}' from: {', '.join(synonyms[:5])}. "
+                         "Explain the nuances in Chinese.")
+            INSERT INTO differentiations (word_id, text, source='llm', reviewed=0)
+
+        # 7. 补词根词缀
+        if not has_morphology(word.id):
+            result = llm(f"Analyze the morphology of '{word.word}': prefix, root, suffix.")
+            INSERT INTO morphologies (word_id, text, source='llm', reviewed=0)
+```
+
+### 4.2 角色 B: 质量评价 (evaluate.py)
+
+**触发时机：** 可独立运行，也可在 fill_gaps.py 后运行，或定期运行。
+
+**原则：** LLM 只评价，不修改数据。评价结果写入 `evaluations` 表，人工审核后决定是否采纳。
+
+```python
+def evaluate():
+    for each word in words:
+        # 1. 翻译一致性：中文翻译是否准确对应英文定义
+        defs = SELECT text FROM definitions WHERE word_id = word.id AND source IN ('stardict','wn')
+        trs = SELECT text FROM translations WHERE word_id = word.id
+        if defs and trs:
+            result = llm(f"""
+                Evaluate the translation accuracy for '{word.word}'.
+                English definitions: {defs}
+                Chinese translations: {trs}
+                Check: does the Chinese translation accurately reflect the English definition?
+                Score 1-5 (1=completely wrong, 5=perfect).
+                Respond in JSON: {{"score": N, "comment": "...", "suggestion": "..." or null}}
+            """)
+            if result.score < 4:
+                INSERT INTO evaluations (target_table='translations', target_id=tr.id,
+                    word_id=word.id, dimension='translation_accuracy',
+                    score=result.score, comment=result.comment,
+                    suggestion=result.suggestion,
+                    severity='critical' if result.score <= 2 else 'warning')
+
+        # 2. 定义完整度
+        for each def in definitions WHERE word_id = word.id:
+            result = llm(f"""
+                Evaluate this definition for '{word.word}':
+                "{def.text}"
+                Is it too brief, too vague, or adequately complete?
+                Score 1-5 (1=useless, 5=comprehensive).
+                Respond in JSON.
+            """)
+            if result.score < 4:
+                INSERT INTO evaluations (...)
+
+        # 3. 例句自然度
+        for each ex in examples WHERE word_id = word.id AND source IN ('stardict','wn','llm'):
+            result = llm(f"""
+                Evaluate this example sentence for '{word.word}':
+                "{ex.text}"
+                Is it natural, idiomatic English? Does it illustrate the word's meaning well?
+                Score 1-5.
+                Respond in JSON.
+            """)
+            if result.score < 4:
+                INSERT INTO evaluations (...)
+
+        # 4. 跨源一致性 (stardict vs wn)
+        stardict_defs = SELECT text FROM definitions WHERE word_id=word.id AND source='stardict'
+        wn_defs = SELECT text FROM definitions WHERE word_id=word.id AND source='wn'
+        if stardict_defs and wn_defs:
+            result = llm(f"""
+                Compare these two definitions for '{word.word}':
+                stardict: {stardict_defs}
+                wn: {wn_defs}
+                Are they consistent or contradictory?
+                Score 1-5 (1=contradictory, 5=perfectly consistent).
+                Respond in JSON.
+            """)
+            if result.score < 4:
+                INSERT INTO evaluations (...)
+```
+
+**评价结果的使用方式：**
 
 ```
+人工审核面板：
+  1. 按 severity DESC, score ASC 排序 evaluations
+  2. 优先看 critical (score 1-2)
+  3. 人工判断：
+     - 同意评价 → 修改目标数据 + UPDATE evaluations SET reviewed=1
+     - 不同意   → UPDATE evaluations SET reviewed=1 (跳过)
+```
+
+---
+
+## 5. 数据源更新与冲突处理
+
+### 5.1 更新模式
+
+| 模式 | 触发条件 | 行为 |
+|------|---------|------|
+| 全量重导 | 源 DB 被新版替换 | 所有行对比，检测冲突 |
+| 增量导入 | 源 DB 在原基础上新增词条 | 只导入新增，不检测冲突 |
+
+```bash
 python import_stardict.py --mode full
 python import_stardict.py --mode incremental
 python import_wn.py --mode full --lexicon oewn:2026
 python import_wn.py --mode incremental --lexicon oewn:2026
 ```
 
-### 版本追踪
+### 5.2 版本追踪
 
-每次导入在 `import_log` 中记录一条运行记录。
+stardict: 计算文件 SHA256 作为 `source_version`。SHA256 不变则跳过导入。
 
-stardict 的版本标识：
-- 计算文件的 SHA256 作为 `source_version`
-- SHA256 与上次导入相同 → 跳过
-- SHA256 不同 → 执行导入
+wn: 从 `lexicons.version` 字段获取（如 `2025+`）。指定新版本号后执行导入。
 
-wn 的版本标识：
-- wn.db 中 `lexicons` 表有 `version` 字段（如 `2025+`）
-- 导入时指定 `--lexicon oewn:2026`，版本号写入 `source_version`
+### 5.3 冲突检测规则
 
-### 附属表冲突检测与处理
+| 行状态 | 行为 |
+|--------|------|
+| `modified=0 AND reviewed=0` | **直接覆写** |
+| `modified=1 OR reviewed=1` (附属表) | **生成 pending_change** |
+| `curated=1` (words 表) | **字段级对比，差异生成 pending_change** |
+| 源中全新的数据 | **直接插入** |
 
-附属表（definitions/translations/examples/word_relations/word_forms）的冲突检测粒度是**行级**——源中同一 (word_id, source) 对应的文本发生了变化。
+### 5.4 附属表冲突检测
+
+粒度：行级。源中同一 (word_id, source) 的文本发生了变化。
 
 ```
 for each source_row in source:
-    # 1. 精确匹配：同 word_id + 同 source + 同 text → 无变化，跳过
-    exact_match = SELECT * FROM {table}
-                  WHERE word_id=? AND source=? AND text=?
-    if exact_match:
-        continue
+    # 精确匹配：同 word_id + 同 source + 同 text → 跳过
+    match = SELECT * FROM {table} WHERE word_id=? AND source=? AND text=?
+    if match: continue
 
-    # 2. 同源匹配：同 word_id + 同 source，但 text 不同 → 源数据变了
-    same_source = SELECT * FROM {table}
-                  WHERE word_id=? AND source=?
+    # 同源匹配：同 word_id + 同 source，但 text 不同
+    same_source = SELECT * FROM {table} WHERE word_id=? AND source=?
 
     if same_source:
         if same_source.modified == 0 AND same_source.reviewed == 0:
             # 未人工改动 → 直接覆写
             UPDATE {table} SET text=?, updated_at=now() WHERE id=same_source.id
-            stats.updated += 1
         else:
-            # 已人工改动 → 生成冲突，不覆写
+            # 已人工改动 → 生成冲突
             INSERT OR IGNORE INTO pending_changes (
-                table_name, row_id, word_id, field=NULL,
+                table_name, row_id=same_source.id, word_id, field=NULL,
                 old_value=same_source.text, new_value=source_row.text,
                 source=source_name, import_log_id=current_import_id
             )
-            stats.conflicts += 1
-
     else:
-        # 3. 无同源匹配 → 全新数据，直接插入
-        # 但需检查是否有其他源的同文本行（去重）
+        # 无同源匹配 → 全新数据，直接插入
         INSERT OR IGNORE INTO {table} (word_id, text, source, ...)
-        stats.new += 1
 ```
 
-**设计要点：**
-- 冲突不产生新的数据行，而是写入 `pending_changes` 队列。
-- 查询时只查数据表，不 join pending_changes。待审批的修改完全隔离，不影响正常查询。
-- 同一条源行多次导入不会生成重复的 pending_change（`INSERT OR IGNORE` + 唯一约束）。
+### 5.5 words 表冲突检测
 
-### words 表冲突检测与处理
-
-words 表的冲突检测粒度是**字段级**——curated=1 时，逐字段对比。
+粒度：字段级。curated=1 时逐字段对比。
 
 ```
 for each source_row in source:
     existing = SELECT * FROM words WHERE word=? AND (pos=? OR ...)
 
     if existing:
-        if sources does not contain source_name:
-            UPDATE words SET sources = sources + ',' + source_name WHERE id=existing.id
+        # 追加 sources
+        if source_name NOT IN existing.sources:
+            UPDATE words SET sources = sources || ',' || source_name
 
         if existing.curated == 0:
-            # 未人工审核 → 逐字段覆写（按优先级）
+            # 未审核 → 逐字段覆写（按优先级）
             for each field in [pos, phonetic, collins, oxford, bnc, frq, tag, exchange]:
-                if source_has_field AND current_source_priority >= field_source_priority:
+                if source_has_field AND source_priority >= existing_priority:
                     UPDATE words SET {field}=? WHERE id=existing.id
-            stats.updated += 1
         else:
-            # 已人工审核 → 逐字段对比，差异生成 pending_change
+            # 已审核 → 逐字段对比，差异生成 pending_change
             for each field in [pos, phonetic, collins, oxford, bnc, frq, tag, exchange]:
-                old_val = getattr(existing, field)
-                new_val = getattr(source_row, field)
+                old_val, new_val = existing.{field}, source_row.{field}
                 if old_val != new_val and new_val is not None:
                     INSERT OR IGNORE INTO pending_changes (
                         table_name='words', row_id=existing.id, word_id=existing.id,
                         field=field, old_value=old_val, new_value=new_val,
                         source=source_name, import_log_id=current_import_id
                     )
-                    stats.conflicts += 1
     else:
         INSERT INTO words (word, pos, ..., sources=source_name)
-        stats.new += 1
 ```
 
-### 源中删除的词条处理
+### 5.6 源删除处理
 
-外部源删除数据时，dict.db **不做级联删除**。只更新 `words.sources` 字段（移除该源名）。
+外部源删除数据时，dict.db **不做级联删除**。只更新 `words.sources`：
 
-```
-# 全量导入完成后，检查本次源中缺失的词
-words_from_this_source = SELECT word FROM words WHERE sources LIKE '%{source_name}%'
-words_in_current_source = {all words from source}
-deleted_words = words_from_this_source - words_in_current_source
+```python
+words_from_source = SELECT word FROM words WHERE sources LIKE '%{source}%'
+words_in_current = {all words from current source}
+deleted = words_from_source - words_in_current
 
-for word in deleted_words:
-    UPDATE words SET sources = REPLACE(sources, '{source_name}', '') WHERE word = ?
-    # 清理 sources 中的空逗号
-    UPDATE words SET sources = REPLACE(sources, ',,', ',') WHERE word = ?
-    # 清理首尾逗号
+for word in deleted:
+    UPDATE words SET sources = REPLACE(REPLACE(sources, source, ''), ',,', ',')
+    -- 清理首尾逗号
 ```
 
-词条本身保留，附属数据保留。
+词条和附属数据保留。源删除不意味着数据失效——其他源可能仍提供同一词条。
 
-### 冲突审批流程
+### 5.7 冲突审批
 
-人工在 UI 中查看 `pending_changes`，逐条决定：
+人工在 UI 中逐条处理 `pending_changes`：
 
 ```
-审批通过 (status='approved'):
+审批通过:
     if table_name == 'words':
-        UPDATE words SET {field} = new_value, updated_at = now()
-        WHERE id = row_id
-        INSERT INTO change_log (table_name, row_id, field, old_value, new_value, action='update')
+        UPDATE words SET {field} = new_value, updated_at=now() WHERE id=row_id
     else:
         UPDATE {table_name} SET text = new_value,
-               modified = 0, reviewed = 1, reviewed_at = now(), updated_at = now()
-        WHERE id = row_id
-        INSERT INTO change_log (table_name, row_id, field='text', old_value, new_value, action='update')
-    UPDATE pending_changes SET status = 'approved', resolved_at = now() WHERE id = ?
+               modified=0, reviewed=1, reviewed_at=now(), updated_at=now()
+        WHERE id=row_id
+    INSERT INTO change_log (...)
+    UPDATE pending_changes SET status='approved', resolved_at=now()
 
-审批通过但人工调整 (先改值再通过):
-    # 人工将 new_value 改为自定义值 Z
-    UPDATE pending_changes SET new_value = 'Z' WHERE id = ?
-    # 然后走上述审批通过流程
+审批通过但人工调整:
+    # 人工先修改 pending_changes.new_value 为自定义值
+    UPDATE pending_changes SET new_value=? WHERE id=?
+    # 然后走审批通过流程
 
-审批拒绝 (status='rejected'):
-    # 不修改数据表，仅标记 pending_change 状态
-    UPDATE pending_changes SET status = 'rejected', resolved_at = now() WHERE id = ?
+审批拒绝:
+    # 不修改数据表
+    UPDATE pending_changes SET status='rejected', resolved_at=now()
 ```
-
-**审批通过的语义：** 接受新数据源的值，替代人工修改过的旧值。`modified` 复位为 0（因为现在是源数据），`reviewed` 置为 1（因为人工确认过这个新版本）。
-
-**审批拒绝的语义：** 保留人工修改的版本，丢弃新数据源的建议。
-
-### 增量导入
-
-增量导入仅处理源中**新增**的数据，已存在的数据不触发冲突检测。
-
-```
-def import_stardict(mode='full'):
-    current_hash = sha256('data/stardict.db')
-    last = get_last_import('stardict')
-
-    if last and last.source_version == current_hash:
-        print("Source unchanged, skipping.")
-        return
-
-    if mode == 'incremental' and last:
-        existing_words = SELECT word FROM words WHERE sources LIKE '%stardict%'
-        new_rows = [r for r in source_rows if r.word not in existing_words]
-        process(new_rows, detect_conflicts=False)  # 只插入，不检测冲突
-    else:
-        process(source_rows, detect_conflicts=True)  # 全量检测
-
-    record_import_log('stardict', current_hash, mode, stats)
-```
-
-**增量模式下不检测冲突**的原因：增量意味着源只追加了新词条，不会修改已有词条的数据。如果源确实修改了已有数据，应该用全量模式。
-
-### 导入流水线
-
-```
-1. import_stardict.py   ─┐
-2. import_wn.py         ─┤ 全量或增量
-3. fill_gaps.py         ─┘ 补全新产生的空缺
-4. 人工审批 pending_changes
-```
-
-导入操作幂等：重复运行不会产生重复数据或重复冲突。
-
-### 导入失败处理
-
-全量重导如果中途失败，`import_log` 中留下 `status='failed'` 的记录，但已写入的数据和 pending_changes 不回滚。修复问题后重新运行即可，幂等机制保证不会重复。
 
 ---
 
-## 查询示例
+## 6. 查询示例
 
-### 查单词完整信息（含审核状态）
+### 6.1 查单词完整信息
 
 ```sql
 SELECT w.word, w.pos, w.phonetic, w.phonetic_source,
-       w.collins, w.bnc, w.frq, w.tag,
-       w.curated, w.curated_at,
-       d.text AS definition, d.source AS def_source, d.confidence AS def_conf,
-       d.reviewed AS def_reviewed, d.modified AS def_modified,
-       t.text AS translation, t.source AS tr_source, t.confidence AS tr_conf,
-       t.reviewed AS tr_reviewed, t.modified AS tr_modified
+       w.collins, w.bnc, w.frq, w.tag, w.curated,
+       d.text AS definition, d.source AS def_src, d.reviewed AS def_ok,
+       t.text AS translation, t.source AS tr_src, t.reviewed AS tr_ok
 FROM words w
 LEFT JOIN definitions d ON d.word_id = w.id
 LEFT JOIN translations t ON t.word_id = w.id
 WHERE w.word = 'bank'
 ORDER BY
-    CASE WHEN d.source='human' OR d.modified=1 THEN 0 ELSE 1 END,
-    d.reviewed DESC, d.confidence DESC,
-    CASE WHEN t.source='human' OR t.modified=1 THEN 0 ELSE 1 END,
-    t.reviewed DESC, t.confidence DESC;
+    CASE WHEN d.source='human' OR d.modified=1 THEN 0
+         WHEN d.source IN ('stardict','wn') AND d.reviewed=1 THEN 1
+         WHEN d.source IN ('stardict','wn') AND d.reviewed=0 THEN 2
+         WHEN d.source='llm' AND d.reviewed=1 THEN 3
+         ELSE 4 END,
+    CASE WHEN t.source='human' OR t.modified=1 THEN 0
+         WHEN t.source IN ('stardict','wn') AND t.reviewed=1 THEN 1
+         WHEN t.source IN ('stardict','wn') AND t.reviewed=0 THEN 2
+         WHEN t.source='llm' AND t.reviewed=1 THEN 3
+         ELSE 4 END;
 ```
 
-### 查待审核项
+### 6.2 查同义词
 
 ```sql
--- 待审核的定义
-SELECT w.word, d.text, d.source, d.confidence
-FROM definitions d
-JOIN words w ON w.id = d.word_id
-WHERE d.reviewed = 0
-ORDER BY d.source, d.confidence DESC;
-
--- 待审核的翻译
-SELECT w.word, t.text, t.source, t.confidence
-FROM translations t
-JOIN words w ON w.id = t.word_id
-WHERE t.reviewed = 0
-ORDER BY t.source, t.confidence DESC;
-
--- 待审核的 LLM 例句翻译
-SELECT w.word, e.text, e.translation
-FROM examples e
-JOIN words w ON w.id = e.word_id
-WHERE e.trans_source = 'llm' AND e.trans_reviewed = 0;
-```
-
-### 查同义词（优先人工/已审核）
-
-```sql
-SELECT wr.related_word, wr.relation_type, wr.source,
-       wr.reviewed, wr.modified
+SELECT wr.related_word, wr.relation_type, wr.source, wr.reviewed
 FROM word_relations wr
 JOIN words w ON w.id = wr.word_id
 WHERE w.word = 'happy' AND wr.relation_type = 'synonym'
@@ -1013,22 +1234,69 @@ ORDER BY
     wr.reviewed DESC;
 ```
 
-### 过滤低质量数据
+### 6.3 查词形变化
 
 ```sql
--- 只看人类确认过的数据
-SELECT * FROM definitions WHERE word_id = ?
-  AND (source = 'human' OR reviewed = 1);
-
--- 排除 AI 未审核
-SELECT * FROM translations WHERE word_id = ?
-  AND NOT (source = 'llm' AND reviewed = 0);
+SELECT form, form_type
+FROM word_forms
+WHERE word_id = (SELECT id FROM words WHERE word = 'run');
 ```
 
-### 查待审批冲突
+### 6.4 查高频词
 
 ```sql
--- 按来源和词分组查看所有待审批冲突
+SELECT word, pos, frq, collins FROM words
+WHERE frq IS NOT NULL
+ORDER BY frq ASC
+LIMIT 100;
+```
+
+### 6.5 查例句（含翻译状态）
+
+```sql
+SELECT e.text, e.translation,
+       e.source, e.reviewed,
+       e.trans_source, e.trans_reviewed
+FROM examples e
+JOIN words w ON w.id = e.word_id
+WHERE w.word = 'bank'
+ORDER BY
+    CASE WHEN e.source='human' OR e.modified=1 THEN 0
+         WHEN e.source IN ('stardict','wn') AND e.reviewed=1 THEN 1
+         ELSE 2 END;
+```
+
+### 6.6 查待审核数据
+
+```sql
+-- 按优先级：LLM 未审核 > 外部源未审核
+SELECT w.word, d.text, d.source, 'definition' AS type
+FROM definitions d JOIN words w ON w.id = d.word_id
+WHERE d.reviewed = 0 AND d.source = 'llm'
+UNION ALL
+SELECT w.word, d.text, d.source, 'definition' AS type
+FROM definitions d JOIN words w ON w.id = d.word_id
+WHERE d.reviewed = 0 AND d.source IN ('stardict','wn')
+ORDER BY type, source;
+```
+
+### 6.7 查 LLM 评价
+
+```sql
+-- 按严重程度排序，优先看 critical
+SELECT w.word, e.target_table, e.dimension,
+       e.score, e.severity, e.comment, e.suggestion
+FROM evaluations e
+JOIN words w ON w.id = e.word_id
+WHERE e.reviewed = 0
+ORDER BY
+    CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+    e.score ASC;
+```
+
+### 6.8 查待审批冲突
+
+```sql
 SELECT w.word, pc.table_name, pc.field,
        pc.old_value, pc.new_value, pc.source, pc.created_at
 FROM pending_changes pc
@@ -1037,57 +1305,71 @@ WHERE pc.status = 'pending'
 ORDER BY pc.source, pc.created_at;
 ```
 
-### 审核操作 SQL
+### 6.9 审核操作 SQL
 
 ```sql
 -- 审核通过一笔翻译
-UPDATE translations SET reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
+UPDATE translations
+SET reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
 WHERE id = ?;
 INSERT INTO change_log (table_name, row_id, action) VALUES ('translations', ?, 'review');
 
 -- 人工修改定义文本
-UPDATE definitions SET text = ?, modified = 1, modified_at = datetime('now'),
-       reviewed = 1, reviewed_at = datetime('now'), confidence = 1.0, updated_at = datetime('now')
+UPDATE definitions
+SET text = ?, modified = 1, modified_at = datetime('now'),
+    reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
 WHERE id = ?;
 INSERT INTO change_log (table_name, row_id, field, old_value, new_value, action)
-VALUES ('definitions', ?, 'text', old_text, new_text, 'update');
+VALUES ('definitions', ?, 'text', ?, ?, 'update');
 
 -- 人工新建翻译
-INSERT INTO translations (word_id, text, source, confidence, reviewed, modified)
-VALUES (?, ?, 'human', 1.0, 1, 0);
-INSERT INTO change_log (table_name, row_id, action) VALUES ('translations', last_insert_rowid(), 'create');
+INSERT INTO translations (word_id, text, source, reviewed, modified)
+VALUES (?, ?, 'human', 1, 0);
 
--- 审批通过数据源更新冲突 (附属表)
-UPDATE definitions SET text = (SELECT new_value FROM pending_changes WHERE id = ?),
-       modified = 0, reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
-WHERE id = (SELECT row_id FROM pending_changes WHERE id = ?);
-UPDATE pending_changes SET status = 'approved', resolved_at = datetime('now') WHERE id = ?;
-
--- 审批通过数据源更新冲突 (words 表字段)
-UPDATE words SET collins = (SELECT new_value FROM pending_changes WHERE id = ?),
-       updated_at = datetime('now')
+-- 审批通过数据源冲突 (附属表)
+UPDATE definitions SET
+    text = (SELECT new_value FROM pending_changes WHERE id = ?),
+    modified = 0, reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
 WHERE id = (SELECT row_id FROM pending_changes WHERE id = ?);
 UPDATE pending_changes SET status = 'approved', resolved_at = datetime('now') WHERE id = ?;
 INSERT INTO change_log (table_name, row_id, field, old_value, new_value, action)
-SELECT 'words', row_id, field, old_value, new_value, 'update'
+SELECT table_name, row_id, field, old_value, new_value, 'update'
 FROM pending_changes WHERE id = ?;
 
--- 审批拒绝冲突
+-- 审批通过数据源冲突 (words 表字段)
+UPDATE words SET
+    collins = CAST((SELECT new_value FROM pending_changes WHERE id = ?) AS INTEGER),
+    updated_at = datetime('now')
+WHERE id = (SELECT row_id FROM pending_changes WHERE id = ?);
+UPDATE pending_changes SET status = 'approved', resolved_at = datetime('now') WHERE id = ?;
+
+-- 审批拒绝
 UPDATE pending_changes SET status = 'rejected', resolved_at = datetime('now') WHERE id = ?;
+
+-- 处理 LLM 评价 (同意并修改)
+UPDATE definitions SET text = (SELECT suggestion FROM evaluations WHERE id = ?),
+    modified = 1, modified_at = datetime('now'),
+    reviewed = 1, reviewed_at = datetime('now'), updated_at = datetime('now')
+WHERE id = (SELECT target_id FROM evaluations WHERE id = ?);
+UPDATE evaluations SET reviewed = 1, reviewed_at = datetime('now') WHERE id = ?;
+
+-- 处理 LLM 评价 (不同意，跳过)
+UPDATE evaluations SET reviewed = 1, reviewed_at = datetime('now') WHERE id = ?;
 ```
 
 ---
 
-## 数据统计估算
+## 7. 数据统计估算
 
-| 表 | 预估行数 | 来源 |
+| 表 | 预估行数 | 说明 |
 |----|---------|------|
 | words | ~200,000 | stardict 全量 + wn 补充 |
 | definitions | ~250,000 | wn ~120k + stardict ~130k (去重后) + LLM |
 | translations | ~180,000 | stardict 全量 + wn ILI 中文映射 + LLM |
-| examples | ~80,000 | wn ~50k + stardict detail 解析 + LLM 翻译 |
+| examples | ~80,000 | wn ~50k + stardict detail 解析 + LLM 生成 |
 | word_relations | ~400,000 | wn synset_relations 展开 + sense_relations |
 | word_forms | ~100,000 | stardict exchange 展开 + wn forms 补充 |
+| evaluations | ~变动 | 取决于评价覆盖范围和阈值 |
+| pending_changes | ~0 起步 | 仅在源更新且有人工修改时产生 |
 | change_log | ~0 起步 | 仅人工操作时写入 |
 | import_log | ~10/年 | 每次导入一条记录 |
-| pending_changes | ~0 起步 | 仅在源更新且有人工修改时产生 |
