@@ -119,6 +119,31 @@ BEFORE UPDATE ON {table}
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 ```
 
+### 3.2 审核状态联动触发器
+
+附属表（definitions / translations / examples / word_relations / word_forms）中，`modified=true` 意味着人工已修改文本，逻辑上必须已审核。通过触发器在数据库层强制该约束，避免应用层遗漏。
+
+```sql
+CREATE OR REPLACE FUNCTION enforce_reviewed_on_modify()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.modified = true AND NEW.reviewed = false THEN
+        NEW.reviewed = true;
+        NEW.reviewed_at = NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+每张带 `modified` + `reviewed` 的附属表附加：
+
+```sql
+CREATE TRIGGER trg_{table}_modified_reviewed
+BEFORE INSERT OR UPDATE ON {table}
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
+```
+
 ---
 
 ## 4. 表结构
@@ -208,6 +233,8 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 - `false` = 未审核，字段值来自 ETL 自动导入。
 - `true` = 已审核，人工已逐字段检查并确认。人工编辑任意字段时自动置 true。
 
+> **与附属表的关系：** `words.curated` 仅控制**词条级字段**（phonetic、collins、bnc 等），不强制要求 definitions、translations 等附属表全部 `reviewed=true`。两者是独立审核维度。若业务需要"词条全量审核"语义，应在应用层额外检查附属表的 `reviewed` 覆盖度。
+
 **sources 操作示例：**
 
 ```sql
@@ -242,13 +269,18 @@ CREATE TABLE definitions (
     UNIQUE (word_id, text, source)
 );
 
-CREATE INDEX idx_definitions_word     ON definitions (word_id);
-CREATE INDEX idx_definitions_source   ON definitions (source);
-CREATE INDEX idx_definitions_reviewed ON definitions (reviewed);
+CREATE INDEX idx_definitions_word        ON definitions (word_id);
+CREATE INDEX idx_definitions_word_source ON definitions (word_id, source);
+CREATE INDEX idx_definitions_source      ON definitions (source);
+CREATE INDEX idx_definitions_reviewed    ON definitions (reviewed);
 
 CREATE TRIGGER trg_definitions_updated_at
 BEFORE UPDATE ON definitions
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_definitions_modified_reviewed
+BEFORE INSERT OR UPDATE ON definitions
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 ```
 
 **来源说明：**
@@ -295,13 +327,18 @@ CREATE TABLE translations (
     UNIQUE (word_id, text, language, source)
 );
 
-CREATE INDEX idx_translations_word     ON translations (word_id);
-CREATE INDEX idx_translations_source   ON translations (source);
-CREATE INDEX idx_translations_reviewed ON translations (reviewed);
+CREATE INDEX idx_translations_word          ON translations (word_id);
+CREATE INDEX idx_translations_word_language ON translations (word_id, language);
+CREATE INDEX idx_translations_source        ON translations (source);
+CREATE INDEX idx_translations_reviewed      ON translations (reviewed);
 
 CREATE TRIGGER trg_translations_updated_at
 BEFORE UPDATE ON translations
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_translations_modified_reviewed
+BEFORE INSERT OR UPDATE ON translations
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 ```
 
 **来源说明：**
@@ -348,6 +385,10 @@ CREATE INDEX idx_examples_reviewed ON examples (reviewed);
 CREATE TRIGGER trg_examples_updated_at
 BEFORE UPDATE ON examples
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_examples_modified_reviewed
+BEFORE INSERT OR UPDATE ON examples
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 ```
 
 **独立追踪示例：**
@@ -376,7 +417,18 @@ CREATE TABLE word_relations (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     word_id       BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word  CITEXT NOT NULL,   -- 关联词形 (lemma)，大小写不敏感
-    relation_type TEXT NOT NULL,     -- 关系类型，见下方列表
+    relation_type TEXT NOT NULL
+                  CHECK (relation_type IN (
+                      'synonym', 'antonym', 'similar',
+                      'hypernym', 'hyponym', 'instance_hypernym', 'instance_hyponym',
+                      'holo_part', 'mero_part', 'holo_member', 'mero_member',
+                      'holo_substance', 'mero_substance',
+                      'causes', 'is_caused_by', 'entails', 'is_entailed_by',
+                      'derivation', 'participle', 'pertainym',
+                      'domain_region', 'has_domain_region',
+                      'domain_topic', 'has_domain_topic',
+                      'also', 'attribute', 'exemplifies', 'is_exemplified_by', 'other'
+                  )),
     source        data_source NOT NULL DEFAULT 'wn',
     reviewed      BOOLEAN NOT NULL DEFAULT false,
     reviewed_at   TIMESTAMPTZ,
@@ -396,6 +448,10 @@ CREATE INDEX idx_relations_reviewed ON word_relations (reviewed);
 CREATE TRIGGER trg_word_relations_updated_at
 BEFORE UPDATE ON word_relations
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_word_relations_modified_reviewed
+BEFORE INSERT OR UPDATE ON word_relations
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 ```
 
 **关系类型（relation_type）完整列表：**
@@ -434,8 +490,7 @@ CREATE TABLE word_forms (
     word_id     BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     form        TEXT NOT NULL,
     form_type   form_type NOT NULL,
-    source      data_source NOT NULL DEFAULT 'stardict'
-                CHECK (source IN ('stardict', 'wn', 'human')),
+    source      data_source NOT NULL DEFAULT 'stardict',
     reviewed    BOOLEAN NOT NULL DEFAULT false,
     reviewed_at TIMESTAMPTZ,
     modified    BOOLEAN NOT NULL DEFAULT false,
@@ -447,10 +502,15 @@ CREATE TABLE word_forms (
 );
 
 CREATE INDEX idx_wordforms_word ON word_forms (word_id);
+CREATE INDEX idx_wordforms_form ON word_forms (form);
 
 CREATE TRIGGER trg_word_forms_updated_at
 BEFORE UPDATE ON word_forms
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_word_forms_modified_reviewed
+BEFORE INSERT OR UPDATE ON word_forms
+FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 ```
 
 **form_type 与 stardict exchange JSON key 的映射：**
@@ -476,7 +536,7 @@ CREATE TABLE evaluations (
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     -- 评价目标
     target_table TEXT NOT NULL
-                 CHECK (target_table IN ('definitions','translations','examples','word_relations')),
+                 CHECK (target_table IN ('definitions','translations','examples','word_relations','word_forms')),
     target_id    BIGINT NOT NULL,               -- 目标表中的行 ID，由触发器验证存在性
     word_id      BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     -- 评价内容
@@ -491,10 +551,11 @@ CREATE TABLE evaluations (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_evaluations_target   ON evaluations (target_table, target_id);
-CREATE INDEX idx_evaluations_word     ON evaluations (word_id);
-CREATE INDEX idx_evaluations_score    ON evaluations (score);
-CREATE INDEX idx_evaluations_reviewed ON evaluations (reviewed);
+CREATE INDEX idx_evaluations_target       ON evaluations (target_table, target_id);
+CREATE INDEX idx_evaluations_word         ON evaluations (word_id);
+CREATE INDEX idx_evaluations_word_reviewed ON evaluations (word_id, reviewed);
+CREATE INDEX idx_evaluations_score        ON evaluations (score);
+CREATE INDEX idx_evaluations_reviewed     ON evaluations (reviewed);
 ```
 
 **target_id 完整性触发器：**
@@ -532,6 +593,7 @@ FOR EACH ROW EXECUTE FUNCTION check_evaluation_target();
 | cross_source_consistency | definitions + translations | stardict 和 wn 对同一词的定义/翻译是否矛盾 |
 | relation_accuracy        | word_relations             | 语义关系是否正确                           |
 | form_correctness         | word_forms                 | 词形变化是否正确                           |
+| orphan_suggestion        | word_forms                 | 某词形是否无对应 words 行（提示关联补全）   |
 
 **severity 语义：**
 
@@ -556,6 +618,17 @@ LLM 评价 → 写入 evaluations (reviewed=false)
 
 `status='rejected'` 的记录保留 90 天后由定期任务清理（防止无限膨胀）。
 
+**NULL 语义澄清：**
+
+| 字段 | NULL 含义 | 审批动作 |
+|------|----------|---------|
+| `row_id` | 源新增了整行，本地词库尚无对应记录 | 确认后执行 `INSERT` 新行 |
+| `field` | 整行变更（如 definitions 的 text 全量替换），非字段级 | 按整行更新处理 |
+| `old_value` | 本地值为 NULL 或整行新增时无旧值 | 审批通过时直接写入 `new_value` |
+| `row_id=NULL` 且 `field=NULL` | 源建议新增一条完整附属记录 | 人工确认后插入新行到对应表 |
+
+审批 UI 必须根据 `table_name` + `row_id` + `field` 的组合判断执行 `INSERT`、`UPDATE` 还是 `DELETE`。
+
 ```sql
 CREATE TABLE pending_changes (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -572,8 +645,9 @@ CREATE TABLE pending_changes (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_pending_word   ON pending_changes (word_id);
-CREATE INDEX idx_pending_status ON pending_changes (status);
+CREATE INDEX idx_pending_word          ON pending_changes (word_id);
+CREATE INDEX idx_pending_status        ON pending_changes (status);
+CREATE INDEX idx_pending_status_created ON pending_changes (status, created_at);
 
 -- 定期清理 rejected 超过 90 天的记录
 -- 由外部 cron 或 pg_cron 扩展执行：
@@ -618,8 +692,9 @@ CREATE TABLE change_log (
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_changelog_table_row ON change_log (table_name, row_id);
-CREATE INDEX idx_changelog_changed_at ON change_log (changed_at);
+CREATE INDEX idx_changelog_table_row      ON change_log (table_name, row_id);
+CREATE INDEX idx_changelog_changed_at     ON change_log (changed_at);
+CREATE INDEX idx_changelog_operator_changed ON change_log (operator, changed_at);
 ```
 
 ### 4.11 import_log — 外部源导入记录
@@ -688,6 +763,17 @@ RETURNS TRIGGER AS $$
 BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION enforce_reviewed_on_modify()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.modified = true AND NEW.reviewed = false THEN
+        NEW.reviewed = true;
+        NEW.reviewed_at = NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION check_evaluation_target()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -696,6 +782,7 @@ BEGIN
         WHEN 'translations'   THEN PERFORM 1 FROM translations   WHERE id = NEW.target_id;
         WHEN 'examples'       THEN PERFORM 1 FROM examples       WHERE id = NEW.target_id;
         WHEN 'word_relations' THEN PERFORM 1 FROM word_relations WHERE id = NEW.target_id;
+        WHEN 'word_forms'     THEN PERFORM 1 FROM word_forms     WHERE id = NEW.target_id;
         ELSE RAISE EXCEPTION 'Unknown target_table: %', NEW.target_table;
     END CASE;
     IF NOT FOUND THEN
@@ -790,12 +877,15 @@ CREATE TABLE definitions (
 
     UNIQUE (word_id, text, source)
 );
-CREATE INDEX idx_definitions_word     ON definitions (word_id);
-CREATE INDEX idx_definitions_source   ON definitions (source);
-CREATE INDEX idx_definitions_reviewed ON definitions (reviewed);
+CREATE INDEX idx_definitions_word        ON definitions (word_id);
+CREATE INDEX idx_definitions_word_source ON definitions (word_id, source);
+CREATE INDEX idx_definitions_source      ON definitions (source);
+CREATE INDEX idx_definitions_reviewed    ON definitions (reviewed);
 
 CREATE TRIGGER trg_definitions_updated_at
 BEFORE UPDATE ON definitions FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_definitions_modified_reviewed
+BEFORE INSERT OR UPDATE ON definitions FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 
 -- ============================================================
 -- 中文翻译
@@ -815,12 +905,15 @@ CREATE TABLE translations (
 
     UNIQUE (word_id, text, language, source)
 );
-CREATE INDEX idx_translations_word     ON translations (word_id);
-CREATE INDEX idx_translations_source   ON translations (source);
-CREATE INDEX idx_translations_reviewed ON translations (reviewed);
+CREATE INDEX idx_translations_word          ON translations (word_id);
+CREATE INDEX idx_translations_word_language ON translations (word_id, language);
+CREATE INDEX idx_translations_source        ON translations (source);
+CREATE INDEX idx_translations_reviewed      ON translations (reviewed);
 
 CREATE TRIGGER trg_translations_updated_at
 BEFORE UPDATE ON translations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_translations_modified_reviewed
+BEFORE INSERT OR UPDATE ON translations FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 
 -- ============================================================
 -- 例句
@@ -851,6 +944,8 @@ CREATE INDEX idx_examples_reviewed ON examples (reviewed);
 
 CREATE TRIGGER trg_examples_updated_at
 BEFORE UPDATE ON examples FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_examples_modified_reviewed
+BEFORE INSERT OR UPDATE ON examples FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 
 -- ============================================================
 -- 语义关系
@@ -859,7 +954,18 @@ CREATE TABLE word_relations (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     word_id       BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word  CITEXT NOT NULL,
-    relation_type TEXT NOT NULL,
+    relation_type TEXT NOT NULL
+                  CHECK (relation_type IN (
+                      'synonym', 'antonym', 'similar',
+                      'hypernym', 'hyponym', 'instance_hypernym', 'instance_hyponym',
+                      'holo_part', 'mero_part', 'holo_member', 'mero_member',
+                      'holo_substance', 'mero_substance',
+                      'causes', 'is_caused_by', 'entails', 'is_entailed_by',
+                      'derivation', 'participle', 'pertainym',
+                      'domain_region', 'has_domain_region',
+                      'domain_topic', 'has_domain_topic',
+                      'also', 'attribute', 'exemplifies', 'is_exemplified_by', 'other'
+                  )),
     source        data_source NOT NULL DEFAULT 'wn',
     reviewed      BOOLEAN NOT NULL DEFAULT false,
     reviewed_at   TIMESTAMPTZ,
@@ -877,6 +983,8 @@ CREATE INDEX idx_relations_reviewed ON word_relations (reviewed);
 
 CREATE TRIGGER trg_word_relations_updated_at
 BEFORE UPDATE ON word_relations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_word_relations_modified_reviewed
+BEFORE INSERT OR UPDATE ON word_relations FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 
 -- ============================================================
 -- 词形变化
@@ -886,8 +994,7 @@ CREATE TABLE word_forms (
     word_id     BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     form        TEXT NOT NULL,
     form_type   form_type NOT NULL,
-    source      data_source NOT NULL DEFAULT 'stardict'
-                CHECK (source IN ('stardict', 'wn', 'human')),
+    source      data_source NOT NULL DEFAULT 'stardict',
     reviewed    BOOLEAN NOT NULL DEFAULT false,
     reviewed_at TIMESTAMPTZ,
     modified    BOOLEAN NOT NULL DEFAULT false,
@@ -898,9 +1005,12 @@ CREATE TABLE word_forms (
     UNIQUE (word_id, form, form_type)
 );
 CREATE INDEX idx_wordforms_word ON word_forms (word_id);
+CREATE INDEX idx_wordforms_form ON word_forms (form);
 
 CREATE TRIGGER trg_word_forms_updated_at
 BEFORE UPDATE ON word_forms FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_word_forms_modified_reviewed
+BEFORE INSERT OR UPDATE ON word_forms FOR EACH ROW EXECUTE FUNCTION enforce_reviewed_on_modify();
 
 -- ============================================================
 -- LLM 质量评价
@@ -908,7 +1018,7 @@ BEFORE UPDATE ON word_forms FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TABLE evaluations (
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     target_table TEXT NOT NULL
-                 CHECK (target_table IN ('definitions','translations','examples','word_relations')),
+                 CHECK (target_table IN ('definitions','translations','examples','word_relations','word_forms')),
     target_id    BIGINT NOT NULL,
     word_id      BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     dimension    TEXT NOT NULL,
@@ -920,10 +1030,11 @@ CREATE TABLE evaluations (
     reviewed_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_evaluations_target   ON evaluations (target_table, target_id);
-CREATE INDEX idx_evaluations_word     ON evaluations (word_id);
-CREATE INDEX idx_evaluations_score    ON evaluations (score);
-CREATE INDEX idx_evaluations_reviewed ON evaluations (reviewed);
+CREATE INDEX idx_evaluations_target       ON evaluations (target_table, target_id);
+CREATE INDEX idx_evaluations_word         ON evaluations (word_id);
+CREATE INDEX idx_evaluations_word_reviewed ON evaluations (word_id, reviewed);
+CREATE INDEX idx_evaluations_score        ON evaluations (score);
+CREATE INDEX idx_evaluations_reviewed     ON evaluations (reviewed);
 
 CREATE TRIGGER trg_evaluations_target_check
 BEFORE INSERT OR UPDATE ON evaluations
@@ -946,8 +1057,9 @@ CREATE TABLE pending_changes (
     resolved_at   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_pending_word   ON pending_changes (word_id);
-CREATE INDEX idx_pending_status ON pending_changes (status);
+CREATE INDEX idx_pending_word          ON pending_changes (word_id);
+CREATE INDEX idx_pending_status        ON pending_changes (status);
+CREATE INDEX idx_pending_status_created ON pending_changes (status, created_at);
 
 -- ============================================================
 -- 人工操作审计
@@ -963,8 +1075,9 @@ CREATE TABLE change_log (
     operator   TEXT,
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_changelog_table_row  ON change_log (table_name, row_id);
-CREATE INDEX idx_changelog_changed_at ON change_log (changed_at);
+CREATE INDEX idx_changelog_table_row      ON change_log (table_name, row_id);
+CREATE INDEX idx_changelog_changed_at     ON change_log (changed_at);
+CREATE INDEX idx_changelog_operator_changed ON change_log (operator, changed_at);
 ```
 
 ---
@@ -981,6 +1094,20 @@ CREATE INDEX idx_changelog_changed_at ON change_log (changed_at);
 ```
 
 第二步是"合并"模式——wn 中已存在的词条更新补充字段，不新增重复行；wn 独有的词条新增。
+
+**事务边界：**
+
+- `import_stardict.py` 和 `import_wn.py` 各作为一个**整体事务**执行（`BEGIN ... COMMIT`）。阶段内部若某一批次失败，仅回滚该批次，已成功的批次保持提交，避免全量重试的昂贵开销。
+- 每个批次写入 `import_log` 的初始状态（`status='running'`）**先于主事务提交**，确保外部监控可见；最终 `status='completed'` 或 `'failed'` 在主事务结束时同步更新。
+
+**并发控制：**
+
+```sql
+-- 防止同一数据源并发导入
+SELECT pg_advisory_lock(hashtext('import_' || $source_name));
+```
+
+导入脚本开头获取 PostgreSQL advisory lock，同一源（如 `'wn'`）的导入任务互斥。不同源（`'stardict'` vs `'wn'`）可并发，因为它们的冲突域独立（仅通过 `words` 表的 `ON CONFLICT` 解决）。
 
 ### 6.2 字段导入优先级
 
@@ -1004,6 +1131,22 @@ CREATE INDEX idx_changelog_changed_at ON change_log (changed_at);
 - **已有值不被覆盖**，除非新源优先级更高。
 - **curated=true 的 words 行**，任何 ETL 都不修改其字段。
 - **reviewed=true 或 modified=true 的附属表行**，ETL 不覆写，差异进入 pending_changes。
+
+**JSONB 字段合并策略（exchange / detail）：**
+
+`exchange` 和 `detail` 为 JSONB，ETL 不整体替换，而是**键级合并（key-level merge）**：
+
+```python
+# 以 exchange 为例
+old_exchange = existing.exchange or {}
+new_exchange = source_row.exchange or {}
+merged = {**old_exchange, **new_exchange}  # 新源键覆盖旧源键
+UPDATE words SET exchange = $merged::jsonb WHERE id = $existing.id
+```
+
+- 不同源的 exchange 通常互补（stardict 提供 `pl`/`past`，wn 补充 `pp`/`ing`）。
+- 若两源对同一 key 值不同，按**字段级优先级**决定保留值（如 `exchange` 以 stardict 为主）。
+- `detail` 为 stardict 独有，wn 不写入，合并时仅追加 stardict 的键。
 
 ### 6.3 pos 规范化
 
@@ -1166,6 +1309,8 @@ for each source_row in source:
         ON CONFLICT DO NOTHING
 ```
 
+⚠️ **动态 SQL 安全：** 上述 `{table}` 和 `{field}` 为伪代码占位符。实现时必须通过**白名单校验**（如 `if table not in ALLOWED_TABLES: raise ValueError`），禁止直接字符串拼接传入用户输入，防止 SQL 注入。
+
 ### 6.7 words 表冲突检测
 
 粒度：字段级。`curated=true` 时逐字段对比。
@@ -1196,6 +1341,8 @@ for each source_row in source:
                     VALUES ('words', $existing.id, $existing.id,
                             $field, $old_val::text, $new_val::text, $source_name, $import_id)
                     ON CONFLICT DO NOTHING
+
+> ⚠️ 实现时 `{field}` 必须通过白名单校验，允许的字段严格限定为 `words` 表列名。
     else:
         INSERT INTO words (word, pos, ..., sources) VALUES ($word, $pos, ..., ARRAY[$source_name])
 ```
@@ -1218,6 +1365,17 @@ for word_id in deleted_ids:
 
 词条和附属数据保留。源删除不意味着数据失效——其他源可能仍提供同一词条。
 
+**孤儿词条（orphan）处理：**
+
+当某词的所有上游源都被移除后，`words.sources` 会变为 `'{}'`。此类词条成为"孤儿"——没有上游对其负责，但数据仍保留在库中。建议定期运行清理任务：
+
+```sql
+-- 标记孤儿词条（不删除，仅用于审计）
+SELECT id, word, pos FROM words WHERE sources = '{}';
+```
+
+是否物理删除孤儿词条由业务决定。若删除，需级联删除附属表（由外键 `ON DELETE CASCADE` 自动处理）。
+
 ### 6.9 冲突审批
 
 人工在 UI 中逐条处理 `pending_changes`：
@@ -1239,6 +1397,8 @@ UPDATE pending_changes SET status = 'approved', resolved_at = NOW() WHERE id = $
 UPDATE words SET {field} = $new_value::target_type, updated_at = NOW() WHERE id = $row_id
 -- 同上写 change_log + 更新 pending_changes
 
+> ⚠️ `{field}` 必须通过白名单校验，且 `target_type` 必须为预定义类型映射（如 `collins`→`SMALLINT`、`oxford`→`BOOLEAN`），禁止动态类型转换。
+
 # 审批拒绝
 UPDATE pending_changes SET status = 'rejected', resolved_at = NOW() WHERE id = $pc_id
 ```
@@ -1253,7 +1413,9 @@ LLM 在系统中有两个独立角色：**内容生成**（填充数据）和**�
 
 **触发时机：** ETL 导入完成后执行。
 
-**原则：** 只在外部源都没提供数据时才生成，已有外部源数据的字段 LLM 不碰。幂等：若已有 LLM 生成数据（`source='llm'`）则跳过，不重复生成。
+**原则：** 只在外部源都没提供数据时才生成，已有外部源数据的字段 LLM 不碰。为避免重复调用和费用，若目标字段已存在任何数据（无论来源），则跳过生成；这意味着 LLM 生成的内容一旦写入不会在同一次流水线中被覆盖或补充。
+
+> 注：这不是严格的幂等（重复执行可能因外部数据变化而跳过不同字段），而是**费用控制策略**——同一字段不会重复消耗 LLM token。
 
 ```python
 def fill_gaps():
@@ -1340,27 +1502,38 @@ def evaluate():
 
 ### 8.1 查单词完整信息
 
+多附属表同时 LEFT JOIN 会产生笛卡尔积（如 3 条定义 × 4 条翻译 = 12 行）。推荐用子查询聚合，应用层再展开：
+
 ```sql
 SELECT w.word, w.pos, w.phonetic, w.phonetic_source,
        w.collins, w.bnc, w.frq, w.tags, w.curated,
-       d.text AS definition, d.source AS def_src, d.reviewed AS def_ok,
-       t.text AS translation, t.source AS tr_src, t.reviewed AS tr_ok
+       (SELECT jsonb_agg(
+            jsonb_build_object('text', d.text, 'source', d.source, 'reviewed', d.reviewed)
+            ORDER BY
+                CASE WHEN d.source = 'human' OR d.modified THEN 0
+                     WHEN d.source IN ('stardict','wn') AND d.reviewed THEN 1
+                     WHEN d.source IN ('stardict','wn') AND NOT d.reviewed THEN 2
+                     WHEN d.source = 'llm' AND d.reviewed THEN 3
+                     ELSE 4 END
+        )
+        FROM definitions d WHERE d.word_id = w.id
+       ) AS definitions,
+       (SELECT jsonb_agg(
+            jsonb_build_object('text', t.text, 'source', t.source, 'reviewed', t.reviewed)
+            ORDER BY
+                CASE WHEN t.source = 'human' OR t.modified THEN 0
+                     WHEN t.source IN ('stardict','wn') AND t.reviewed THEN 1
+                     WHEN t.source IN ('stardict','wn') AND NOT t.reviewed THEN 2
+                     WHEN t.source = 'llm' AND t.reviewed THEN 3
+                     ELSE 4 END
+        )
+        FROM translations t WHERE t.word_id = w.id
+       ) AS translations
 FROM words w
-LEFT JOIN definitions d ON d.word_id = w.id
-LEFT JOIN translations t ON t.word_id = w.id
-WHERE w.word = 'bank'
-ORDER BY
-    CASE WHEN d.source = 'human' OR d.modified THEN 0
-         WHEN d.source IN ('stardict','wn') AND d.reviewed  THEN 1
-         WHEN d.source IN ('stardict','wn') AND NOT d.reviewed THEN 2
-         WHEN d.source = 'llm' AND d.reviewed THEN 3
-         ELSE 4 END,
-    CASE WHEN t.source = 'human' OR t.modified THEN 0
-         WHEN t.source IN ('stardict','wn') AND t.reviewed  THEN 1
-         WHEN t.source IN ('stardict','wn') AND NOT t.reviewed THEN 2
-         WHEN t.source = 'llm' AND t.reviewed THEN 3
-         ELSE 4 END;
+WHERE w.word = 'bank';
 ```
+
+若需扁平化结果供 BI/报表直接使用，可用 `LATERAL` + `UNNEST` 展开聚合后的数组，而非直接多表 JOIN。
 
 ### 8.2 查同义词
 
@@ -1533,3 +1706,151 @@ UPDATE evaluations SET reviewed = true, reviewed_at = NOW() WHERE id = $eval_id;
 | pending_changes | ~0 起步  | 仅在源更新且有人工修改时产生               |
 | change_log      | ~0 起步  | 仅人工操作时写入                           |
 | import_log      | ~10/年   | 每次导入一条记录                           |
+
+---
+
+## 10. 数据冗余与一致性策略
+
+### 10.1 `words.exchange` 与 `word_forms` 的冗余
+
+`words.exchange`（JSONB）和 `word_forms`（独立表）存储了同一类信息，但服务于不同场景：
+
+| 存储位置 | 用途 | 权威来源 |
+|---------|------|---------|
+| `words.exchange` | 快速读取原始词形变化（无需 JOIN），保留 stardict 原始结构 | 以 `word_forms` 为准 |
+| `word_forms` | 结构化查询（如"查 banks 的原形"）、审核追踪、多源合并 | 权威来源 |
+
+**一致性保障：**
+
+- ETL 导入时，先写入 `word_forms`，再同步更新 `words.exchange` = `jsonb_object_agg(form_type, form)`。
+- 人工通过 UI 修改词形时，只操作 `word_forms`；触发器或应用层自动将变更反向同步到 `words.exchange`。
+- 若两者意外不一致，以 `word_forms` 为准，可通过定时任务重建 `exchange`：
+
+```sql
+UPDATE words w
+SET exchange = (
+    SELECT jsonb_object_agg(form_type::text, form)
+    FROM word_forms wf WHERE wf.word_id = w.id
+)
+WHERE EXISTS (SELECT 1 FROM word_forms wf WHERE wf.word_id = w.id);
+```
+
+### 10.2 `word_relations.related_word` 存文本而非外键
+
+`word_relations.related_word` 使用 `CITEXT` 存词形文本，而非 `REFERENCES words(id)`，原因是关联词可能尚未被导入（如 wn 关系指向的词条在 stardict 中不存在）。
+
+**影响与补偿：**
+
+- 无法直接 JOIN `words` 获取关联词的 pos、phonetic 等元信息。
+- 关联词后续被导入时，`word_relations` 不会自动建立外键关联。
+- 建议通过视图或定期任务建立可解析的关系：
+
+```sql
+CREATE VIEW word_relations_resolved AS
+SELECT wr.*, rw.id AS related_word_id, rw.pos AS related_pos
+FROM word_relations wr
+LEFT JOIN words rw ON rw.word = wr.related_word;
+```
+
+反向查找（给定词形查原形）依赖 `word_forms` 表的 `idx_wordforms_form` 索引：
+
+```sql
+SELECT w.word, w.pos
+FROM word_forms wf
+JOIN words w ON w.id = wf.word_id
+WHERE wf.form = 'banks';
+```
+
+---
+
+## 11. 安全与运维
+
+### 11.1 数据库角色与权限
+
+建议划分三类数据库角色：
+
+| 角色 | 权限范围 | 说明 |
+|------|---------|------|
+| `dict_etl` | 对全部表的 INSERT/UPDATE/DELETE + `import_log` 读写 | ETL 脚本专用 |
+| `dict_app_read` | 对全部表的 SELECT | 应用查询层、API 只读实例 |
+| `dict_app_write` | 对 `words` 及附属表的 INSERT/UPDATE + `change_log` 写入 + `pending_changes` 更新 | 人工审核后台 |
+
+- `evaluations` 表对 `dict_app_read` 开放 SELECT，用于前端展示 LLM 评价标记。
+- `pending_changes` 的 `DELETE` 权限仅授予定时清理任务账号，人工审核账号只有 `UPDATE`（改 status）。
+
+### 11.2 Schema 迁移
+
+使用 [Alembic](https://alembic.sqlalchemy.org/) 或 [Atlas](https://atlasgo.io/) 管理 schema 版本：
+
+- 所有 DDL 变更通过迁移脚本执行，禁止直接在生产环境手工 `ALTER TABLE`。
+- 枚举类型新增值需特殊处理（PostgreSQL ENUM 不支持直接删除值）：
+
+```sql
+-- 扩展 ENUM 示例
+ALTER TYPE data_source ADD VALUE 'new_source';
+```
+
+- 迁移脚本命名规范：`YYYYMMDD_HHMMSS_<description>.sql` 或 Alembic 自动生成的 revision ID。
+
+### 11.3 备份与恢复
+
+- **日常备份：** `pg_dump --format=custom --file=dict_$(date +%F).dump dict_db`
+- **Point-in-Time Recovery (PITR)：** 启用 WAL 归档（`archive_mode = on`），配合 `pg_basebackup` 实现任意时间点恢复。
+- **关键表逻辑备份：** 定期导出 `words`、`definitions`、`translations`、`change_log` 为 CSV/JSONL，便于跨环境迁移和审计追溯。
+
+---
+
+## 12. 已知边界与限制
+
+### 12.1 查询性能
+
+- `words.word` 使用 `CITEXT`，索引支持大小写不敏感匹配，但 `LIKE '%bank%'` 前缀模糊查询仍会走全表扫描。若需前缀/后缀搜索，建议引入 `pg_trgm` 扩展和 GIN 索引：
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX idx_words_word_trgm ON words USING GIN (word gin_trgm_ops);
+```
+
+- `idx_words_pos` 单独索引选择性极低（仅 5 种值），对纯 `WHERE pos = 'n'` 查询帮助有限；保留它是为了与 `word` 组合成 `(pos, word)` 覆盖索引的基础。若出现慢查询，优先检查执行计划，必要时添加复合索引。
+
+### 12.2 数据完整性边界
+
+- `evaluations.target_id` 通过触发器验证存在性，而非外键。这允许评价在目标数据被删除后成为"悬空评价"。建议定期清理：
+
+```sql
+DELETE FROM evaluations e
+WHERE NOT EXISTS (
+    SELECT 1 FROM definitions   WHERE id = e.target_id
+    UNION ALL SELECT 1 FROM translations WHERE id = e.target_id
+    UNION ALL SELECT 1 FROM examples     WHERE id = e.target_id
+    UNION ALL SELECT 1 FROM word_relations WHERE id = e.target_id
+    UNION ALL SELECT 1 FROM word_forms   WHERE id = e.target_id
+);
+```
+
+- `word_relations` 的双向对称性（如 synonym）由**应用层/ETL 保证**，数据库不强制约束。导入后应运行断言检查：
+
+```sql
+-- 检查 synonym 是否双向存在
+SELECT a.word_id, a.related_word
+FROM word_relations a
+LEFT JOIN word_relations b
+    ON b.word_id = (SELECT id FROM words WHERE word = a.related_word)
+    AND b.related_word = (SELECT word FROM words WHERE id = a.word_id)
+    AND b.relation_type = 'synonym'
+WHERE a.relation_type = 'synonym' AND b.id IS NULL;
+```
+
+### 12.3 多语言扩展预留
+
+当前 `translations.language` 默认 `'zh'`，schema 已预留多语种能力。未来扩展时：
+
+- 新增语言只需写入不同 `language` 值（如 `'ja'`、`'fr'`），无需改表结构。
+- 查询时需显式指定 `language`，避免返回混合语种。
+- 若语种数量激增（>10 种），建议将 `translations` 按 `language` 水平分区（PostgreSQL 声明式分区）。
+
+### 12.4 规模上限
+
+- 当前设计面向 ~20 万词条、~100 万附属记录级别。若词条量增长至百万级，需评估：
+  - `words.exchange` JSONB 体积膨胀，考虑拆出为独立 `word_forms` 查询。
+  - `word_relations` 膨胀最快，考虑按 `relation_type` 分区或图数据库（如 Neo4j） offload 关系查询。
