@@ -37,7 +37,7 @@ flowchart TD
 
     SD --> ISD
     WN --> IWN
-    ISD -->|words definitions\ntranslations examples\nword_forms| DB[(dict.db)]
+    ISD -->|words definitions<br/>translations examples<br/>word_forms| DB[(dict.db)]
     IWN -->|merge + relations| DB
 
     DB -->|fields missing| FG
@@ -86,16 +86,16 @@ ORDER BY
 
 ```mermaid
 flowchart TD
-    R([Record]) --> C1{source = human\nor modified = true?}
-    C1 -->|Yes| L0[Priority 0\nHighest Quality]
-    C1 -->|No| C2{source = stardict\nor wn?}
+    R([Record]) --> C1{source = human<br/>or modified = true?}
+    C1 -->|Yes| L0[Priority 0<br/>Highest Quality]
+    C1 -->|No| C2{source = stardict<br/>or wn?}
     C2 -->|Yes| C3{reviewed = true?}
-    C3 -->|Yes| L1[Priority 1\nHigh Quality]
-    C3 -->|No| L2[Priority 2\nMedium Quality]
+    C3 -->|Yes| L1[Priority 1<br/>High Quality]
+    C3 -->|No| L2[Priority 2<br/>Medium Quality]
     C2 -->|No| C4{source = llm?}
     C4 -->|Yes| C5{reviewed = true?}
-    C5 -->|Yes| L3[Priority 3\nMedium Quality]
-    C5 -->|No| L4[Priority 4\nLow Quality]
+    C5 -->|Yes| L3[Priority 3<br/>Medium Quality]
+    C5 -->|No| L4[Priority 4<br/>Low Quality]
     C4 -->|No| L4
 ```
 
@@ -104,9 +104,9 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     direction LR
-    Unreviewed: Unreviewed\nsource = stardict / wn / llm
-    Reviewed: Reviewed\nreviewed = true
-    Modified: Modified\nmodified = true\nreviewed = true
+    Unreviewed: Unreviewed<br/>source = stardict / wn / llm
+    Reviewed: Reviewed<br/>reviewed = true
+    Modified: Modified<br/>modified = true<br/>reviewed = true
 
     [*] --> Unreviewed: ETL insert or fill_gaps
     Unreviewed --> Reviewed: Human approves
@@ -173,6 +173,8 @@ $$ LANGUAGE plpgsql;
 
 每张有 `updated_at` 的表建表后附加：
 
+> **额外触发器**：`words` 表还有一个 `trg_words_curated_at` 触发器，当 `curated` 从 false 变为 true 时自动写入 `curated_at`。函数定义见第 5 节完整 SQL。
+
 ```sql
 CREATE TRIGGER trg_{table}_updated_at
 BEFORE UPDATE ON {table}
@@ -185,18 +187,18 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 ### 4.1 表总览
 
-| 表              | 用途                              | 预估行数 |
-| --------------- | --------------------------------- | -------- |
-| words           | 单词主表，一个 (word, pos) 一行   | ~200,000 |
-| definitions     | 英文定义，一对多                  | ~250,000 |
-| translations    | 中文翻译，一对多                  | ~180,000 |
-| examples        | 例句，文本和翻译独立追踪          | ~80,000  |
-| word_relations  | 语义关系（同义/反义/上下位/派生） | ~400,000 |
-| word_forms      | 词形变化（复数/时态/比较级）      | ~100,000 |
-| evaluations     | LLM 质量评价记录                  | ~变动    |
-| pending_changes | 外部源更新产生的冲突审批队列      | ~0 起步  |
-| change_log      | 人工操作审计日志                  | ~0 起步  |
-| import_log      | 外部源导入运行记录                | ~10/年   |
+| 表              | 用途                              | 预估行数                    |
+| --------------- | --------------------------------- | --------------------------- |
+| words           | 单词主表，一个 (word, pos) 一行   | ~200,000                    |
+| definitions     | 英文定义，一对多                  | ~250,000                    |
+| translations    | 中文翻译，一对多                  | ~180,000                    |
+| examples        | 例句，文本和翻译独立追踪          | ~80,000                     |
+| word_relations  | 语义关系（同义/反义/上下位/派生） | ~400,000                    |
+| word_forms      | 词形变化（复数/时态/比较级）      | ~100,000                    |
+| evaluations     | LLM 质量评价记录                  | ~变动（已审核的可定期归档） |
+| pending_changes | 外部源更新产生的冲突审批队列      | ~0 起步                     |
+| change_log      | 人工操作审计日志                  | ~0 起步                     |
+| import_log      | 外部源导入运行记录                | ~10/年                      |
 
 ### 4.2 words — 单词主表
 
@@ -240,28 +242,43 @@ CREATE INDEX idx_words_curated ON words (curated);
 CREATE INDEX idx_words_tags    ON words USING GIN (tags);
 CREATE INDEX idx_words_sources ON words USING GIN (sources);
 
--- 触发器
+-- 触发器：自动更新 updated_at
 CREATE TRIGGER trg_words_updated_at
 BEFORE UPDATE ON words
 FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- 触发器：curated 从 false→true 时自动写入 curated_at
+CREATE OR REPLACE FUNCTION set_curated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.curated = true AND (OLD.curated = false OR OLD.curated IS NULL) THEN
+        NEW.curated_at = NOW();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_words_curated_at
+BEFORE UPDATE ON words
+FOR EACH ROW EXECUTE FUNCTION set_curated_at();
 ```
 
 **字段说明：**
 
-| 字段     | 来源                            | 说明                                                 |
-| -------- | ------------------------------- | ---------------------------------------------------- |
-| word     | 所有源共有                      | 词形本身，CITEXT 保证大小写不敏感匹配                |
-| pos      | stardict(部分) / wn(全) / human | wn 的 pos 更完整；NULL 表示词性未知                  |
-| phonetic | wn > stardict > human           | wn IPA 更规范                                        |
-| audio    | stardict                        | wn 理论上也有但极少填充                              |
-| collins  | stardict                        | 柯林斯词典独有                                       |
-| oxford   | stardict                        | 牛津词典独有                                         |
-| bnc      | stardict                        | 英国国家语料库词频                                   |
-| frq      | stardict                        | 美国当代英语语料库词频                               |
-| tags     | stardict                        | 考试分类标签，TEXT[] 数组                            |
-| exchange | stardict + wn 补充              | stardict 为主，wn forms 表补充缺失，JSONB 可直接查键 |
-| detail   | stardict                        | 原始扩展 JSON，不展开                                |
-| sources  | ETL 自动维护                    | TEXT[] 数组，记录哪些上游提供了此词条                |
+| 字段     | 来源                            | 说明                                                                                                                                                                                                                                           |
+| -------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| word     | 所有源共有                      | 词形本身，CITEXT 保证大小写不敏感匹配                                                                                                                                                                                                          |
+| pos      | stardict(部分) / wn(全) / human | wn 的 pos 更完整；NULL 表示词性未知                                                                                                                                                                                                            |
+| phonetic | wn > stardict > human           | wn IPA 更规范                                                                                                                                                                                                                                  |
+| audio    | stardict                        | wn 理论上也有但极少填充                                                                                                                                                                                                                        |
+| collins  | stardict                        | 柯林斯词典独有                                                                                                                                                                                                                                 |
+| oxford   | stardict                        | 牛津词典独有                                                                                                                                                                                                                                   |
+| bnc      | stardict                        | 英国国家语料库词频                                                                                                                                                                                                                             |
+| frq      | stardict                        | 美国当代英语语料库词频                                                                                                                                                                                                                         |
+| tags     | stardict                        | 考试分类标签，TEXT[] 数组                                                                                                                                                                                                                      |
+| exchange | stardict + wn 补充              | stardict 为主，wn forms 表补充缺失，JSONB 可直接查键。**与 word_forms 表存在数据冗余**，word_forms 是规范化存储（可单独审核），exchange 是非规范化缓存（供应用快速读取）。两者以 word_forms 为主，exchange 由 ETL 从 word_forms 反向同步填充。 |
+| detail   | stardict                        | 原始扩展 JSON，不展开                                                                                                                                                                                                                          |
+| sources  | ETL 自动维护                    | TEXT[] 数组，记录哪些上游提供了此词条                                                                                                                                                                                                          |
 
 **curated 语义：**
 
@@ -436,7 +453,16 @@ CREATE TABLE word_relations (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     word_id       BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word  CITEXT NOT NULL,   -- 关联词形 (lemma)，大小写不敏感
-    relation_type TEXT NOT NULL,     -- 关系类型，见下方列表
+    relation_type TEXT NOT NULL     -- 关系类型，见下方列表
+                  CHECK (relation_type IN (
+                      'synonym','antonym','similar',
+                      'hypernym','hyponym','instance_hypernym','instance_hyponym',
+                      'holo_part','mero_part','holo_member','mero_member','holo_substance','mero_substance',
+                      'causes','is_caused_by','entails','is_entailed_by',
+                      'derivation','participle','pertainym',
+                      'domain_region','has_domain_region','domain_topic','has_domain_topic',
+                      'also','attribute','exemplifies','is_exemplified_by','other'
+                  )),
     source        data_source NOT NULL DEFAULT 'wn',
     reviewed      BOOLEAN NOT NULL DEFAULT false,
     reviewed_at   TIMESTAMPTZ,
@@ -495,7 +521,7 @@ CREATE TABLE word_forms (
     form        TEXT NOT NULL,
     form_type   form_type NOT NULL,
     source      data_source NOT NULL DEFAULT 'stardict'
-                CHECK (source IN ('stardict', 'wn', 'human')),
+                CHECK (source <> 'llm'),  -- LLM 不生成词形变化；data_source ENUM 已约束合法值，此处仅排除 llm
     reviewed    BOOLEAN NOT NULL DEFAULT false,
     reviewed_at TIMESTAMPTZ,
     modified    BOOLEAN NOT NULL DEFAULT false,
@@ -549,6 +575,9 @@ CREATE TABLE evaluations (
     reviewed     BOOLEAN NOT NULL DEFAULT false,
     reviewed_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    -- NOTE: 此表无 updated_at 字段和对应触发器，这是刻意设计：
+    -- LLM 只写一次（INSERT），人工只做 reviewed=true 的 UPDATE，reviewed_at 已追踪审核时间。
+    -- 若未来需要追踪 LLM 是否重新评分，可添加 updated_at。
 );
 
 CREATE INDEX idx_evaluations_target   ON evaluations (target_table, target_id);
@@ -616,24 +645,35 @@ LLM 评价 → 写入 evaluations (reviewed=false)
 
 `status='rejected'` 的记录保留 90 天后由定期任务清理（防止无限膨胀）。
 
+`evaluations` 表随时间持续增长，建议：
+- `reviewed=true` 的记录保留 180 天后可归档到冷存储（或单独归档表）。
+- 定期任务（pg_cron）清理逻辑：`DELETE FROM evaluations WHERE reviewed=true AND reviewed_at < NOW() - INTERVAL '180 days'`。
+
 ```sql
 CREATE TABLE pending_changes (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    table_name    TEXT NOT NULL,         -- 目标表
+    table_name    TEXT NOT NULL
+                  CHECK (table_name IN ('words','definitions','translations','examples','word_relations','word_forms')),
     row_id        BIGINT,                -- 目标表中已有行的 ID；NULL 表示源新增了整行待确认
     word_id       BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     field         TEXT,                  -- 字段名 (仅 words 表使用，附属表为 NULL 表示整行)
     old_value     TEXT,                  -- dict.db 当前值
     new_value     TEXT,                  -- 新数据源建议值
     source        TEXT NOT NULL CHECK (source IN ('stardict', 'wn')),
+    -- NOTE: 此字段刻意使用 TEXT 而非 data_source ENUM，因为 pending_changes 只来自外部源（不含 llm/human）。
+    -- 合法值：'stardict' | 'wn'。不复用 data_source ENUM 以便在类型层面排除 llm/human。
     import_log_id BIGINT REFERENCES import_log(id),
     status        change_status NOT NULL DEFAULT 'pending',
     resolved_at   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_pending_word   ON pending_changes (word_id);
-CREATE INDEX idx_pending_status ON pending_changes (status);
+CREATE INDEX idx_pending_word       ON pending_changes (word_id);
+CREATE INDEX idx_pending_status     ON pending_changes (status);
+CREATE INDEX idx_pending_import_log ON pending_changes (import_log_id);
+-- import_log 自身也加索引，供运维查询
+CREATE INDEX idx_import_log_source  ON import_log (source);
+CREATE INDEX idx_import_log_status  ON import_log (status);
 
 -- 定期清理 rejected 超过 90 天的记录
 -- 由外部 cron 或 pg_cron 扩展执行：
@@ -668,13 +708,14 @@ ETL 自动导入不记日志（避免膨胀）。仅人工操作时写入。
 ```sql
 CREATE TABLE change_log (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    table_name TEXT NOT NULL,          -- 目标表
+    table_name TEXT NOT NULL
+               CHECK (table_name IN ('words','definitions','translations','examples','word_relations','word_forms')),
     row_id     BIGINT NOT NULL,        -- 目标行 ID
     field      TEXT,                   -- 被修改的字段名；NULL 表示整行操作
     old_value  TEXT,                   -- 旧值；NULL 表示新建
     new_value  TEXT,                   -- 新值；NULL 表示删除
     action     change_action NOT NULL,
-    operator   TEXT,                   -- 操作人 ID 或用户名
+    operator   TEXT NOT NULL DEFAULT 'system'  -- 操作人 ID；来自 HTTP Header X-Operator-ID，无则默认 system
     changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -692,10 +733,9 @@ CREATE TABLE import_log (
     mode                 import_mode NOT NULL,
     started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at          TIMESTAMPTZ,
-    duration_seconds     INTEGER        -- ETL 结束时写入，finished_at - started_at
-                         GENERATED ALWAYS AS (
-                             EXTRACT(EPOCH FROM (finished_at - started_at))::INTEGER
-                         ) STORED,
+    duration_seconds     INTEGER,       -- ETL 结束时由应用写入；GENERATED ALWAYS AS STORED 对 NULL 输入计算结果为 NULL（status='running' 时），行为正确但依赖应用在 finished_at 写入前保持该字段为 NULL。
+                         -- 若需要计算列：GENERATED ALWAYS AS (EXTRACT(EPOCH FROM (finished_at - started_at))::INTEGER) STORED
+                         -- 但计算列不允许应用写入，此处改为普通列由 ETL 在 UPDATE import_log SET finished_at=NOW(), duration_seconds=... WHERE id=... 时手动写入。
     new_words            INTEGER DEFAULT 0,
     updated_words        INTEGER DEFAULT 0,
     new_definitions      INTEGER DEFAULT 0,
@@ -775,9 +815,7 @@ CREATE TABLE import_log (
     mode                 import_mode NOT NULL,
     started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at          TIMESTAMPTZ,
-    duration_seconds     INTEGER GENERATED ALWAYS AS (
-                             EXTRACT(EPOCH FROM (finished_at - started_at))::INTEGER
-                         ) STORED,
+    duration_seconds     INTEGER,       -- ETL 完成时手动写入，不使用 GENERATED ALWAYS AS（计算列不允许应用层赋值）
     new_words            INTEGER DEFAULT 0,
     updated_words        INTEGER DEFAULT 0,
     new_definitions      INTEGER DEFAULT 0,
@@ -919,7 +957,16 @@ CREATE TABLE word_relations (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     word_id       BIGINT NOT NULL REFERENCES words(id) ON DELETE CASCADE,
     related_word  CITEXT NOT NULL,
-    relation_type TEXT NOT NULL,
+    relation_type TEXT NOT NULL
+                  CHECK (relation_type IN (
+                      'synonym','antonym','similar',
+                      'hypernym','hyponym','instance_hypernym','instance_hyponym',
+                      'holo_part','mero_part','holo_member','mero_member','holo_substance','mero_substance',
+                      'causes','is_caused_by','entails','is_entailed_by',
+                      'derivation','participle','pertainym',
+                      'domain_region','has_domain_region','domain_topic','has_domain_topic',
+                      'also','attribute','exemplifies','is_exemplified_by','other'
+                  )),
     source        data_source NOT NULL DEFAULT 'wn',
     reviewed      BOOLEAN NOT NULL DEFAULT false,
     reviewed_at   TIMESTAMPTZ,
@@ -947,7 +994,7 @@ CREATE TABLE word_forms (
     form        TEXT NOT NULL,
     form_type   form_type NOT NULL,
     source      data_source NOT NULL DEFAULT 'stardict'
-                CHECK (source IN ('stardict', 'wn', 'human')),
+                CHECK (source <> 'llm'),  -- LLM 不生成词形变化；data_source ENUM 已约束合法值，此处仅排除 llm
     reviewed    BOOLEAN NOT NULL DEFAULT false,
     reviewed_at TIMESTAMPTZ,
     modified    BOOLEAN NOT NULL DEFAULT false,
@@ -1001,6 +1048,8 @@ CREATE TABLE pending_changes (
     old_value     TEXT,
     new_value     TEXT,
     source        TEXT NOT NULL CHECK (source IN ('stardict', 'wn')),
+    -- NOTE: 此字段刻意使用 TEXT 而非 data_source ENUM，因为 pending_changes 只来自外部源（不含 llm/human）。
+    -- 合法值：'stardict' | 'wn'。不复用 data_source ENUM 以便在类型层面排除 llm/human。
     import_log_id BIGINT REFERENCES import_log(id),
     status        change_status NOT NULL DEFAULT 'pending',
     resolved_at   TIMESTAMPTZ,
@@ -1150,14 +1199,14 @@ erDiagram
 
 ```mermaid
 flowchart LR
-    ISD["Step 1\nimport_stardict.py"] --> IWN["Step 2\nimport_wn.py"]
-    IWN --> FG["Step 3\nfill_gaps.py"]
-    FG --> EV["Step 4\nevaluate.py"]
+    ISD["Step 1<br/>import_stardict.py"] --> IWN["Step 2<br/>import_wn.py"]
+    IWN --> FG["Step 3<br/>fill_gaps.py"]
+    FG --> EV["Step 4<br/>evaluate.py"]
 
-    ISD -. "words\ndefinitions\ntranslations\nexamples\nword_forms" .-> DB[(dict.db)]
-    IWN -. "merge words\nrelations\nforms" .-> DB
-    FG -. "source = llm\ngap fill" .-> DB
-    EV -. "evaluations\ntable" .-> DB
+    ISD -. "words<br/>definitions<br/>translations<br/>examples<br/>word_forms" .-> DB[(dict.db)]
+    IWN -. "merge words<br/>relations<br/>forms" .-> DB
+    FG -. "source = llm<br/>gap fill" .-> DB
+    EV -. "evaluations<br/>table" .-> DB
 ```
 
 第二步是"合并"模式——wn 中已存在的词条更新补充字段，不新增重复行；wn 独有的词条新增。
@@ -1205,20 +1254,26 @@ def normalize_pos(raw: str) -> str | None:
 
 **原则：** 宁可置 NULL，不写入错误 pos 值。
 
+**pos=NULL 的词的处理：** stardict 中含 prep/conj/pron 等 WordNet 不覆盖词性的词，以 `pos=NULL` 插入。这类词：
+- 可以有 definitions / translations / examples（正常导入）
+- 不会有 wn 的 synset relations（wn 不覆盖这些词性）
+- 在 `UNIQUE NULLS NOT DISTINCT (word, pos)` 约束下，每个 word 最多有一行 `pos=NULL`
+- 若同一词在 stardict 中出现多个词性条目（如 "light" 的 n/v/a），则分别以不同 pos 行存储；prep 类单独作为 `pos=NULL` 行
+
 ### 7.4 import_stardict.py
 
 ```mermaid
 flowchart TD
-    START([For each stardict row]) --> NP[Normalize pos\nn. v. adj. → n v a r s]
-    NP --> WE{Word exists\nin words?}
-    WE -->|No| W_INS[INSERT words\nreturn word_id]
-    WE -->|Yes DO NOTHING| W_GET[SELECT id\nreturn word_id]
+    START([For each stardict row]) --> NP[Normalize pos<br/>n. v. adj. → n v a r s]
+    NP --> WE{Word exists<br/>in words?}
+    WE -->|No| W_INS[INSERT words<br/>return word_id]
+    WE -->|Yes DO NOTHING| W_GET[SELECT id<br/>return word_id]
     W_INS --> SRC
-    W_GET --> SRC[Append stardict\nto sources array]
-    SRC --> DEF[INSERT definition\nON CONFLICT DO NOTHING]
-    DEF --> TR[INSERT translation\nON CONFLICT DO NOTHING]
-    TR --> EX[Parse detail JSON\nINSERT examples]
-    EX --> WF[Expand exchange JSON\nINSERT word_forms]
+    W_GET --> SRC[Append stardict<br/>to sources array]
+    SRC --> DEF[INSERT definition<br/>ON CONFLICT DO NOTHING]
+    DEF --> TR[INSERT translation<br/>ON CONFLICT DO NOTHING]
+    TR --> EX[Parse detail JSON<br/>INSERT examples]
+    EX --> WF[Expand exchange JSON<br/>INSERT word_forms]
     WF --> NEXT([Next row])
 ```
 
@@ -1271,16 +1326,16 @@ for each row in stardict:
 
 ```mermaid
 flowchart TD
-    P1[Phase 1\nImport lemmas\nwords table] --> P2[Phase 2\nDefinitions and examples\nfrom synsets]
-    P2 --> P3[Phase 3\nChinese translations\nvia ILI mapping]
-    P3 --> P4[Phase 4\nSemantic relations\nword_relations table]
-    P4 --> P5[Phase 5\nSupplementary forms\nword_forms table]
+    P1[Phase 1<br/>Import lemmas<br/>words table] --> P2[Phase 2<br/>Definitions and examples<br/>from synsets]
+    P2 --> P3[Phase 3<br/>Chinese translations<br/>via ILI mapping]
+    P3 --> P4[Phase 4<br/>Semantic relations<br/>word_relations table]
+    P4 --> P5[Phase 5<br/>Supplementary forms<br/>word_forms table]
 
-    P1 -. "ON CONFLICT DO UPDATE\nsources append" .-> DB[(dict.db)]
-    P2 -. "ON CONFLICT\nDO NOTHING" .-> DB
-    P3 -. "ON CONFLICT\nDO NOTHING" .-> DB
-    P4 -. "ON CONFLICT\nDO NOTHING" .-> DB
-    P5 -. "ON CONFLICT\nDO NOTHING" .-> DB
+    P1 -. "ON CONFLICT DO UPDATE<br/>sources append" .-> DB[(dict.db)]
+    P2 -. "ON CONFLICT<br/>DO NOTHING" .-> DB
+    P3 -. "ON CONFLICT<br/>DO NOTHING" .-> DB
+    P4 -. "ON CONFLICT<br/>DO NOTHING" .-> DB
+    P5 -. "ON CONFLICT<br/>DO NOTHING" .-> DB
 ```
 
 ```python
@@ -1292,12 +1347,15 @@ for each entry in oewn + omw-cmn where pos IN ('n','v','a','r','s'):
     INSERT INTO words (word, pos, pos_source, phonetic, phonetic_source, sources)
     VALUES ($lemma, $pos, 'wn', $best_pron, 'wn' IF pron ELSE NULL, ARRAY['wn'])
     ON CONFLICT ON CONSTRAINT uq_word_pos DO UPDATE
-        SET sources         = CASE WHEN NOT ('wn' = ANY(sources)) THEN array_append(sources,'wn') ELSE sources END,
-            pos             = COALESCE(NULLIF(words.pos, NULL), EXCLUDED.pos),
+        SET sources         = CASE WHEN NOT ('wn' = ANY(words.sources)) THEN array_append(words.sources,'wn') ELSE words.sources END,
+            pos             = COALESCE(words.pos, EXCLUDED.pos),  -- 保留已有 pos，仅在 NULL 时才填入 wn 的 pos
             pos_source      = COALESCE(words.pos_source, 'wn'),
             phonetic        = COALESCE(words.phonetic, EXCLUDED.phonetic),
             phonetic_source = COALESCE(words.phonetic_source, EXCLUDED.phonetic_source)
-    WHERE words.curated = false   -- curated=true 的行由 WHERE 过滤，不更新
+    WHERE words.curated = false
+    -- ^^^^ 这是 DO UPDATE 的 WHERE 条件（PostgreSQL 语法：ON CONFLICT DO UPDATE WHERE），
+    --      不是 INSERT 语句的 WHERE。作用：curated=true 的行冲突时，DO UPDATE 被跳过（等同于 DO NOTHING）。
+    --      curated=true 的行的差异会在后续逐字段对比步骤中生成 pending_changes（见 7.7 节）。
 
     → word_id
 
@@ -1352,13 +1410,13 @@ for each form where rank > 0:
 
 ```mermaid
 flowchart TD
-    START([Source row]) --> EXACT{Exact match?\nword_id + source + text}
+    START([Source row]) --> EXACT{Exact match?<br/>word_id + source + text}
     EXACT -->|Yes| SKIP([Skip - no change])
-    EXACT -->|No| SAME{Same source exists\nfor this word_id?}
+    EXACT -->|No| SAME{Same source exists<br/>for this word_id?}
     SAME -->|No - new data| INSERT[INSERT new row]
-    SAME -->|Yes - text changed| HUMAN{modified = true\nor reviewed = true?}
+    SAME -->|Yes - text changed| HUMAN{modified = true<br/>or reviewed = true?}
     HUMAN -->|No| OVERWRITE[UPDATE text directly]
-    HUMAN -->|Yes - protected| PENDING[INSERT into\npending_changes]
+    HUMAN -->|Yes - protected| PENDING[INSERT into<br/>pending_changes]
     INSERT --> DONE([Done])
     OVERWRITE --> DONE
     PENDING --> DONE
@@ -1366,12 +1424,20 @@ flowchart TD
 
 ```python
 for each source_row in source:
-    # 精确匹配（text 未变）→ 跳过
+    # 精确匹配（word_id + source + text 三者完全一致）→ 跳过
+    # 注意：一个词可以有多条相同 source 的定义（如 wn 一个词多个 synset），
+    # 因此 "同词同源" 不等于 "唯一的一行"，需要用 text 进一步区分。
     match = SELECT 1 FROM {table} WHERE word_id=$1 AND source=$2 AND text=$3
     if match: continue
 
-    # 同源匹配（text 变了）
-    same = SELECT * FROM {table} WHERE word_id=$1 AND source=$2
+    # 同源同文本（精确匹配）不存在，再找同词同源的行集合（可能多行）
+    # 目标：判断这条新数据是"更新了某条已有行"还是"新增了一条"
+    # 策略：用源系统的行 ID（如 wn synset ID）匹配，若没有外部 ID 则视为新增。
+    # 对于 definitions/translations/examples，wn 导入时可携带 synset_id 作为 external_id（可选扩展）。
+    # 简化策略（当前实现）：同词同源同 text 不存在，则视为新增行，不做覆写检测。
+    # 原因：wn synset 定义文本变更是小概率事件，且允许同词多条定义。
+    same_text_changed = SELECT * FROM {table} WHERE word_id=$1 AND source=$2 AND text<>$3
+    # 对于附属表，source 更新视为"追加新行"而非"修改旧行"，除非能通过外部 ID 精确定位。
 
     if same:
         if same.modified = false AND same.reviewed = false:
@@ -1395,14 +1461,14 @@ for each source_row in source:
 
 ```mermaid
 flowchart TD
-    START([Source word]) --> EXIST{Word exists\nin words?}
+    START([Source word]) --> EXIST{Word exists<br/>in words?}
     EXIST -->|No| INSERT[INSERT new word row]
     INSERT --> END([Done])
     EXIST -->|Yes| APPEND[array_append sources]
     APPEND --> CURATED{curated = true?}
 
     CURATED -->|No - auto update| EACH[For each updateable field]
-    EACH --> PRIO{New source\nhigher priority?}
+    EACH --> PRIO{New source<br/>higher priority?}
     PRIO -->|Yes| UPDATE[UPDATE field value]
     PRIO -->|No| SKIP([Skip field])
     UPDATE --> END
@@ -1411,7 +1477,7 @@ flowchart TD
     CURATED -->|Yes - protected| EACH2[For each field]
     EACH2 --> DIFF{Value changed?}
     DIFF -->|No| SKIP
-    DIFF -->|Yes| PENDING[INSERT pending_changes\nfield-level record]
+    DIFF -->|Yes| PENDING[INSERT pending_changes<br/>field-level record]
     PENDING --> END
 ```
 
@@ -1469,17 +1535,17 @@ for word_id in deleted_ids:
 
 ```mermaid
 flowchart TD
-    START([pending_changes\nstatus = pending]) --> UI[Human reviews in UI\nshows old vs new value]
+    START([pending_changes<br/>status = pending]) --> UI[Human reviews in UI<br/>shows old vs new value]
     UI --> DEC{Decision}
 
-    DEC -->|Approve| APPLY[Apply new_value\nto target table]
+    DEC -->|Approve| APPLY[Apply new_value<br/>to target table]
     APPLY --> LOG[INSERT change_log]
     LOG --> APPR[UPDATE status = approved]
 
-    DEC -->|Edit then approve| EDIT[Modify new_value\nin the UI]
+    DEC -->|Edit then approve| EDIT[Modify new_value<br/>in the UI]
     EDIT --> APPLY
 
-    DEC -->|Reject| REJ[UPDATE status = rejected\nresolvedAt = NOW]
+    DEC -->|Reject| REJ[UPDATE status = rejected<br/>resolvedAt = NOW]
 
     APPR --> END([Done])
     REJ --> END
@@ -1520,21 +1586,21 @@ LLM 在系统中有两个独立角色：**内容生成**（填充数据）和**�
 
 ```mermaid
 flowchart TD
-    START([For each word]) --> T{Any translations\nexist?}
-    T -->|No| LLM_T[LLM: generate\ntranslations]
-    LLM_T --> INS_T[INSERT translations\nsource = llm]
+    START([For each word]) --> T{Any translations<br/>exist?}
+    T -->|No| LLM_T[LLM: generate<br/>translations]
+    LLM_T --> INS_T[INSERT translations<br/>source = llm]
     T -->|Yes| D
-    INS_T --> D{Any definitions\nexist?}
-    D -->|No| LLM_D[LLM: generate\ndefinition]
-    LLM_D --> INS_D[INSERT definition\nsource = llm]
+    INS_T --> D{Any definitions<br/>exist?}
+    D -->|No| LLM_D[LLM: generate<br/>definition]
+    LLM_D --> INS_D[INSERT definition<br/>source = llm]
     D -->|Yes| E
-    INS_D --> E{Any examples\nexist?}
-    E -->|No| LLM_E[LLM: generate\n2-3 examples]
-    LLM_E --> INS_E[INSERT examples\nsource = llm]
+    INS_D --> E{Any examples<br/>exist?}
+    E -->|No| LLM_E[LLM: generate<br/>2-3 examples]
+    LLM_E --> INS_E[INSERT examples<br/>source = llm]
     E -->|Yes| ET
-    INS_E --> ET{Examples with\ntranslation = NULL?}
-    ET -->|Yes| LLM_ET[LLM: translate\neach example]
-    LLM_ET --> UPD[UPDATE examples\ntranslation field]
+    INS_E --> ET{Examples with<br/>translation = NULL?}
+    ET -->|Yes| LLM_ET[LLM: translate<br/>each example]
+    LLM_ET --> UPD[UPDATE examples<br/>translation field]
     ET -->|No| NEXT([Next word])
     UPD --> NEXT
 ```
@@ -1583,19 +1649,19 @@ def fill_gaps():
 
 ```mermaid
 flowchart TD
-    START([For each word]) --> EACH[For each record in\ndefinitions / translations\nexamples / word_forms]
-    EACH --> LLM[LLM scores record\nscore 1 to 5]
+    START([For each word]) --> EACH[For each record in<br/>definitions / translations<br/>examples / word_forms]
+    EACH --> LLM[LLM scores record<br/>score 1 to 5]
     LLM --> THRESH{score < 4?}
     THRESH -->|No - acceptable| NEXT([Next record])
     THRESH -->|Yes - problem found| SEV{score <= 2?}
     SEV -->|Yes| CRIT[severity = critical]
     SEV -->|No| WARN[severity = warning]
-    CRIT --> INS[INSERT evaluations\nreviewed = false]
+    CRIT --> INS[INSERT evaluations<br/>reviewed = false]
     WARN --> INS
-    INS --> QUEUE[Appears in\nhuman review queue]
+    INS --> QUEUE[Appears in<br/>human review queue]
     QUEUE --> HDEC{Human decision}
-    HDEC -->|Agree - fix data| FIX[Update target record\nMark evaluation reviewed]
-    HDEC -->|Disagree - skip| SKIP[Mark evaluation reviewed\nno data change]
+    HDEC -->|Agree - fix data| FIX[Update target record<br/>Mark evaluation reviewed]
+    HDEC -->|Disagree - skip| SKIP[Mark evaluation reviewed<br/>no data change]
 ```
 
 ```python
@@ -1708,16 +1774,16 @@ reviewed modified| DB[(dict.db)]
 
 **词条相关**
 
-| Method  | Path                      | 说明                                 |
-| ------- | ------------------------- | ------------------------------------ |
-| `GET`   | `/words`                  | 搜索词条（`?q=bank&pos=n&limit=20`） |
-| `GET`   | `/words/:id`              | 获取词条基础信息                     |
-| `PATCH` | `/words/:id/curate`       | 标记 curated=true                    |
-| `GET`   | `/words/:id/definitions`  | 获取该词所有定义                     |
-| `GET`   | `/words/:id/translations` | 获取该词所有翻译                     |
-| `GET`   | `/words/:id/examples`     | 获取该词所有例句                     |
-| `GET`   | `/words/:id/relations`    | 获取该词语义关系                     |
-| `GET`   | `/words/:id/forms`        | 获取该词词形变化                     |
+| Method  | Path                      | 说明                                                                                                                                                      |
+| ------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`   | `/words`                  | 搜索词条（`?q=bank&pos=n&limit=20&offset=0`）。搜索语义：精确匹配优先（`word = $q`，利用 CITEXT 大小写不敏感）；无精确结果时可回退前缀匹配（`word LIKE $q |  | '%'`）。两种模式通过 `?mode=exact`（默认）或 `?mode=prefix` 区分，避免歧义。 |
+| `GET`   | `/words/:id`              | 获取词条基础信息                                                                                                                                          |
+| `PATCH` | `/words/:id/curate`       | 标记 curated=true                                                                                                                                         |
+| `GET`   | `/words/:id/definitions`  | 获取该词所有定义                                                                                                                                          |
+| `GET`   | `/words/:id/translations` | 获取该词所有翻译                                                                                                                                          |
+| `GET`   | `/words/:id/examples`     | 获取该词所有例句                                                                                                                                          |
+| `GET`   | `/words/:id/relations`    | 获取该词语义关系                                                                                                                                          |
+| `GET`   | `/words/:id/forms`        | 获取该词词形变化                                                                                                                                          |
 
 **审核（review）**
 
