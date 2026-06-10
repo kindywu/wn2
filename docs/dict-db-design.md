@@ -1635,11 +1635,261 @@ def evaluate():
             if result.score < 4: INSERT INTO evaluations (...)
 ```
 
+
 ---
 
-## 9. 查询示例
+## 9. Web Service
 
-### 9.1 查单词完整信息
+### 9.1 职责边界
+
+Web Service 是唯一对外暴露的在线服务。前端只与 Web Service 交互，永远不直接访问数据库。
+
+```
+ETL Pipeline  →  dict.db  ←→  REST API Backend  ←→  Frontend UI
+(offline)                      (online)
+```
+
+Web Service 的职责：
+
+- **查询**：按词搜索，获取词条完整信息（定义、翻译、例句、关系、词形）
+- **审核**：标记数据为 reviewed，给人工已确认的内容背书
+- **编辑**：修改已有数据文本（触发 modified=true 和 change_log 写入）
+- **新建**：人工创建新的定义、翻译、例句、关系（source=human）
+- **处置 pending_changes**：逐条 approve / edit+approve / reject ETL 产生的冲突
+- **处置 evaluations**：逐条同意（并应用建议）或忽略 LLM 质量评价
+- **词条审核**：标记 words.curated=true
+- **查看历史**：查看 change_log、import_log
+
+### 9.2 工作项流转：ETL → Web Service
+
+ETL 完成一次导入后，会在两张表中留下"待处理工作项"。Web Service 把它们呈现给人工处理。
+
+```mermaid
+flowchart LR
+    subgraph ETL[ETL Pipeline generates]
+        PC[pending_changes
+status = pending]
+        EV[evaluations
+reviewed = false]
+    end
+
+    subgraph WEB[Web Service processes]
+        direction TB
+        RV[Review UI
+shows work items]
+        OPS[Human operations
+approve reject edit]
+    end
+
+    PC -->|read| RV
+    EV -->|read| RV
+    RV --> OPS
+    OPS -->|UPDATE pending_changes
+status = approved/rejected| PC
+    OPS -->|UPDATE evaluations
+reviewed = true| EV
+    OPS -->|UPDATE target tables
+reviewed modified| DB[(dict.db)]
+    OPS -->|INSERT change_log| DB
+```
+
+两类工作项的区别：
+
+|              | pending_changes                         | evaluations                               |
+| ------------ | --------------------------------------- | ----------------------------------------- |
+| **来源**     | import_wn/stardict 检测到与人工修改冲突 | evaluate.py LLM 打分发现质量问题          |
+| **内容**     | old_value vs new_value 二选一           | score + comment + suggestion              |
+| **处置动作** | approve（应用）/ reject（忽略）         | agree（应用 suggestion）/ dismiss（忽略） |
+| **紧迫性**   | 高：不处置则 ETL 更新无法落地           | 低：仅辅助，可延后                        |
+
+### 9.3 API 路由概览
+
+所有路由以 `/api/v1` 为前缀，返回 JSON，鉴权通过 Bearer Token。
+
+**词条相关**
+
+| Method  | Path                      | 说明                                 |
+| ------- | ------------------------- | ------------------------------------ |
+| `GET`   | `/words`                  | 搜索词条（`?q=bank&pos=n&limit=20`） |
+| `GET`   | `/words/:id`              | 获取词条基础信息                     |
+| `PATCH` | `/words/:id/curate`       | 标记 curated=true                    |
+| `GET`   | `/words/:id/definitions`  | 获取该词所有定义                     |
+| `GET`   | `/words/:id/translations` | 获取该词所有翻译                     |
+| `GET`   | `/words/:id/examples`     | 获取该词所有例句                     |
+| `GET`   | `/words/:id/relations`    | 获取该词语义关系                     |
+| `GET`   | `/words/:id/forms`        | 获取该词词形变化                     |
+
+**审核（review）**
+
+| Method  | Path                         | 说明                               |
+| ------- | ---------------------------- | ---------------------------------- |
+| `PATCH` | `/definitions/:id/review`    | reviewed=true                      |
+| `PATCH` | `/translations/:id/review`   | reviewed=true                      |
+| `PATCH` | `/examples/:id/review`       | reviewed=true（含 trans_reviewed） |
+| `PATCH` | `/word-relations/:id/review` | reviewed=true                      |
+| `PATCH` | `/word-forms/:id/review`     | reviewed=true                      |
+
+**编辑（edit）**
+
+| Method  | Path                  | 说明                           |
+| ------- | --------------------- | ------------------------------ |
+| `PATCH` | `/definitions/:id`    | 修改文本（自动 modified=true） |
+| `PATCH` | `/translations/:id`   | 修改文本                       |
+| `PATCH` | `/examples/:id`       | 修改例句或译文                 |
+| `PATCH` | `/word-relations/:id` | 修改关系                       |
+| `PATCH` | `/word-forms/:id`     | 修改词形                       |
+
+**新建（create，source=human）**
+
+| Method | Path                      | 说明         |
+| ------ | ------------------------- | ------------ |
+| `POST` | `/words/:id/definitions`  | 人工新建定义 |
+| `POST` | `/words/:id/translations` | 人工新建翻译 |
+| `POST` | `/words/:id/examples`     | 人工新建例句 |
+| `POST` | `/words/:id/relations`    | 人工新建关系 |
+
+**处置 pending_changes**
+
+| Method  | Path                                           | 说明                                    |
+| ------- | ---------------------------------------------- | --------------------------------------- |
+| `GET`   | `/pending-changes`                             | 获取列表（`?status=pending&source=wn`） |
+| `PATCH` | `/pending-changes/:id/approve`                 | 应用 new_value 到目标表                 |
+| `PATCH` | `/pending-changes/:id/approve` body: `{value}` | 调整后应用                              |
+| `PATCH` | `/pending-changes/:id/reject`                  | 忽略，不修改目标数据                    |
+
+**处置 evaluations**
+
+| Method  | Path                       | 说明                                            |
+| ------- | -------------------------- | ----------------------------------------------- |
+| `GET`   | `/evaluations`             | 获取列表（`?reviewed=false&severity=critical`） |
+| `PATCH` | `/evaluations/:id/agree`   | 应用 suggestion 到目标表                        |
+| `PATCH` | `/evaluations/:id/dismiss` | 标记 reviewed，不修改数据                       |
+
+**运维**
+
+| Method | Path               | 说明                                          |
+| ------ | ------------------ | --------------------------------------------- |
+| `GET`  | `/import-logs`     | 查看导入历史                                  |
+| `GET`  | `/import-logs/:id` | 查看单次导入详情                              |
+| `GET`  | `/change-log`      | 审计日志（`?operator=alice&from=2025-01-01`） |
+
+### 9.4 核心操作流程
+
+**流程 A：人工审核单条记录**
+
+```mermaid
+flowchart TD
+    FE[Frontend
+shows unreviewed record] --> ACT{Human action}
+    ACT -->|Click Approve| API_R[PATCH /:table/:id/review]
+    API_R --> DB_R[UPDATE reviewed=true
+reviewed_at=NOW]
+    DB_R --> LOG_R[INSERT change_log
+action=review]
+    LOG_R --> RESP[200 OK]
+
+    ACT -->|Edit text then save| API_E[PATCH /:table/:id
+body: text=new_text]
+    API_E --> DB_E[UPDATE text=new_text
+modified=true
+reviewed=true
+updated_at=NOW]
+    DB_E --> LOG_E[INSERT change_log
+action=update]
+    LOG_E --> RESP
+```
+
+**流程 B：处置 pending_change（冲突审批）**
+
+```mermaid
+flowchart TD
+    FE2[Frontend
+shows old vs new value] --> ACT2{Human decision}
+
+    ACT2 -->|Approve as-is| AP[PATCH /pending-changes/:id/approve]
+    AP --> DB_AP[Apply new_value to target table
+reviewed=true]
+    DB_AP --> LOG_AP[INSERT change_log
+action=update]
+    LOG_AP --> UPD_AP[UPDATE pending_changes
+status=approved]
+
+    ACT2 -->|Edit value then approve| EAP[PATCH /pending-changes/:id/approve
+body: value=edited_value]
+    EAP --> DB_AP
+
+    ACT2 -->|Reject| RJ[PATCH /pending-changes/:id/reject]
+    RJ --> UPD_RJ[UPDATE pending_changes
+status=rejected
+resolved_at=NOW]
+
+    UPD_AP --> DONE([200 OK])
+    UPD_RJ --> DONE
+```
+
+**流程 C：处置 evaluation（LLM 质量建议）**
+
+```mermaid
+flowchart TD
+    FE3[Frontend
+shows score + comment + suggestion] --> ACT3{Human decision}
+
+    ACT3 -->|Agree apply suggestion| AGR[PATCH /evaluations/:id/agree]
+    AGR --> DB_AGR[UPDATE target table
+text=suggestion
+modified=true
+reviewed=true]
+    DB_AGR --> LOG_AGR[INSERT change_log
+action=update]
+    LOG_AGR --> EV_AGR[UPDATE evaluations
+reviewed=true]
+
+    ACT3 -->|Disagree dismiss| DIS[PATCH /evaluations/:id/dismiss]
+    DIS --> EV_DIS[UPDATE evaluations
+reviewed=true
+no data change]
+
+    EV_AGR --> DONE2([200 OK])
+    EV_DIS --> DONE2
+```
+
+**流程 D：人工新建内容**
+
+```mermaid
+flowchart TD
+    FE4[Frontend
+user fills form] --> API_C[POST /words/:id/translations
+body: text lang]
+    API_C --> VALID{Validate
+duplicate check}
+    VALID -->|Duplicate exists| ERR[409 Conflict]
+    VALID -->|OK| INS[INSERT translations
+source=human
+reviewed=true
+modified=false]
+    INS --> LOG_C[INSERT change_log
+action=create]
+    LOG_C --> OK[201 Created]
+```
+
+### 9.5 后端写入约束
+
+Web Service 写数据库时必须遵守以下规则，防止绕过数据质量控制机制：
+
+| 操作                               | 必须同步执行的动作                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------- |
+| PATCH /:table/:id（编辑文本）      | `modified=true`, `reviewed=true`, `reviewed_at=NOW()`, `updated_at=NOW()`       |
+| PATCH /:table/:id/review（仅审核） | `reviewed=true`, `reviewed_at=NOW()`, `updated_at=NOW()`                        |
+| POST（人工新建）                   | `source='human'`, `reviewed=true`, `modified=false`                             |
+| 任何写操作                         | `INSERT INTO change_log`（action, operator, old_value, new_value）              |
+| PATCH words/:id/curate             | `curated=true`, `curated_at=NOW()`                                              |
+| approve pending_change             | `INSERT change_log` + `UPDATE pending_changes.status='approved'` 必须在同一事务 |
+
+---
+
+## 10. 查询示例
+
+### 10.1 查单词完整信息
 
 ```sql
 SELECT w.word, w.pos, w.phonetic, w.phonetic_source,
@@ -1663,7 +1913,7 @@ ORDER BY
          ELSE 4 END;
 ```
 
-### 9.2 查同义词
+### 10.2 查同义词
 
 ```sql
 SELECT wr.related_word, wr.relation_type, wr.source, wr.reviewed
@@ -1675,7 +1925,7 @@ ORDER BY
     wr.reviewed DESC;
 ```
 
-### 9.3 查词形变化
+### 10.3 查词形变化
 
 ```sql
 SELECT form, form_type
@@ -1683,7 +1933,7 @@ FROM word_forms
 WHERE word_id = (SELECT id FROM words WHERE word = 'run' AND pos = 'v');
 ```
 
-### 9.4 查高频词
+### 10.4 查高频词
 
 ```sql
 SELECT word, pos, frq, collins FROM words
@@ -1692,7 +1942,7 @@ ORDER BY frq ASC
 LIMIT 100;
 ```
 
-### 9.5 查例句（含翻译状态）
+### 10.5 查例句（含翻译状态）
 
 ```sql
 SELECT e.text, e.translation,
@@ -1707,7 +1957,7 @@ ORDER BY
          ELSE 2 END;
 ```
 
-### 9.6 查待审核数据
+### 10.6 查待审核数据
 
 ```sql
 -- LLM 未审核优先，外部源未审核次之
@@ -1726,7 +1976,7 @@ WHERE d.reviewed = false AND d.source IN ('stardict','wn')
 ORDER BY type, source;
 ```
 
-### 9.7 查 LLM 评价
+### 10.7 查 LLM 评价
 
 ```sql
 SELECT w.word, e.target_table, e.dimension,
@@ -1739,7 +1989,7 @@ ORDER BY
     e.score ASC;
 ```
 
-### 9.8 查待审批冲突
+### 10.8 查待审批冲突
 
 ```sql
 SELECT w.word, pc.table_name, pc.field,
@@ -1750,7 +2000,7 @@ WHERE pc.status = 'pending'
 ORDER BY pc.source, pc.created_at;
 ```
 
-### 9.9 审核操作 SQL
+### 10.9 审核操作 SQL
 
 ```sql
 -- 审核通过一笔翻译
@@ -1820,7 +2070,7 @@ UPDATE evaluations SET reviewed = true, reviewed_at = NOW() WHERE id = $eval_id;
 
 ---
 
-## 10. 数据统计估算
+## 11. 数据统计估算
 
 | 表              | 预估行数 | 说明                                       |
 | --------------- | -------- | ------------------------------------------ |
