@@ -17,11 +17,17 @@ pub trait LlmClient: Send + Sync {
 
 /// Helper: call generate() and parse the result as JSON
 pub async fn generate_json<C: LlmClient + ?Sized, T: serde::de::DeserializeOwned>(
-    client: &C, prompt: &str, task: LlmTaskType,
+    client: &C,
+    prompt: &str,
+    task: LlmTaskType,
 ) -> anyhow::Result<T> {
-    let full_prompt = format!("{}\n\nReturn ONLY valid JSON, no markdown code blocks.", prompt);
+    let full_prompt = format!(
+        "{}\n\nReturn ONLY valid JSON, no markdown code blocks.",
+        prompt
+    );
     let raw = client.generate(&full_prompt, task).await?;
-    let json_str = raw.trim()
+    let json_str = raw
+        .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
@@ -65,11 +71,15 @@ impl DeepSeekClient {
     }
 
     async fn rate_limit(&self) {
-        if self.rpm == 0 { return; }
+        if self.rpm == 0 {
+            return;
+        }
         let min_interval_ms = 60_000 / self.rpm as u64 + 10;
         let wait_ms = {
             let last = self.last_request.lock().unwrap();
-            let elapsed = last.map(|t| t.elapsed().as_millis() as u64).unwrap_or(min_interval_ms);
+            let elapsed = last
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(min_interval_ms);
             if elapsed < min_interval_ms {
                 min_interval_ms - elapsed
             } else {
@@ -124,11 +134,20 @@ impl LlmClient for DeepSeekClient {
         let req = ChatRequest {
             model: model.clone(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: system_prompt.into() },
-                ChatMessage { role: "user".into(), content: prompt.to_string() },
+                ChatMessage {
+                    role: "system".into(),
+                    content: system_prompt.into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: prompt.to_string(),
+                },
             ],
             temperature: 0.3,
-            max_tokens: Some(4096),
+            max_tokens: Some(match task {
+                LlmTaskType::Generate => 1500000,
+                LlmTaskType::Evaluate => 800000,
+            }),
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -143,7 +162,8 @@ impl LlmClient for DeepSeekClient {
 
             self.rate_limit().await;
 
-            let resp = self.client
+            let resp = self
+                .client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
@@ -154,7 +174,8 @@ impl LlmClient for DeepSeekClient {
 
             if resp.status().is_success() {
                 let chat_resp: ChatResponse = resp.json().await?;
-                let content = chat_resp.choices
+                let content = chat_resp
+                    .choices
                     .first()
                     .map(|c| c.message.content.clone())
                     .unwrap_or_default();
@@ -170,6 +191,9 @@ impl LlmClient for DeepSeekClient {
             }
         }
 
-        Err(anyhow::anyhow!("LLM API error after {} retries: {last_error}", self.max_retries))
+        Err(anyhow::anyhow!(
+            "LLM API error after {} retries: {last_error}",
+            self.max_retries
+        ))
     }
 }

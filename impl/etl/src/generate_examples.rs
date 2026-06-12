@@ -18,8 +18,13 @@ struct WordEntry {
     translation: String,
 }
 
+const BATCH_SIZE: usize = 50;
+const FALLBACK_SIZE: usize = 10;
+
 pub async fn run(
-    pool: &PgPool, llm: &(impl LlmClient + ?Sized), limit: Option<usize>,
+    pool: &PgPool,
+    llm: &(impl LlmClient + ?Sized),
+    limit: Option<usize>,
 ) -> anyhow::Result<()> {
     info!("Generating examples for tagged words...");
 
@@ -41,52 +46,89 @@ pub async fn run(
 
     info!("Loaded {} words needing examples", rows.len());
 
-    let batch_size = 10;
     let mut total_inserted = 0u64;
+    let mut processed = 0usize;
 
-    for chunk in rows.chunks(batch_size) {
-        let prompt = build_batch_prompt(chunk);
+    let mut i = 0;
+    while i < rows.len() {
+        let end = (i + BATCH_SIZE).min(rows.len());
+        let chunk = &rows[i..end];
 
-        let result: Result<Vec<ExampleResult>, _> =
-            crate::llm_client::generate_json(llm, &prompt, LlmTaskType::Generate).await;
-
-        match result {
-            Ok(results) => {
-                for r in &results {
-                    if r.idx < chunk.len() {
-                        let word_id = chunk[r.idx].id;
-                        for ex in &r.examples {
-                            let ex = ex.trim();
-                            if ex.is_empty() { continue; }
-                            let ex_hash = format!("{:x}", md5::compute(ex));
-                            match sqlx::query(
-                                "INSERT INTO examples (word_id, text, text_hash, source) VALUES ($1, $2, $3, 'llm') ON CONFLICT (word_id, text_hash) DO NOTHING"
-                            )
-                            .bind(word_id).bind(ex).bind(&ex_hash)
-                            .execute(pool).await
-                            {
-                                Ok(r) => { total_inserted += r.rows_affected(); }
-                                Err(e) => { warn!("Insert error: {e}"); }
-                            }
+        match try_batch(pool, llm, chunk).await {
+            Ok(n) => {
+                total_inserted += n;
+                processed += chunk.len();
+                i = end;
+                info!(
+                    "Progress: {processed}/{} words, {total_inserted} examples inserted (batch {})",
+                    rows.len(),
+                    i / BATCH_SIZE
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Batch {}-{} failed ({} words): {}. Retrying in sub-batches...",
+                    i,
+                    end,
+                    chunk.len(),
+                    e
+                );
+                // Fallback: process in smaller sub-batches
+                for sub in chunk.chunks(FALLBACK_SIZE) {
+                    match try_batch(pool, llm, sub).await {
+                        Ok(n) => {
+                            total_inserted += n;
+                            processed += sub.len();
+                            info!("  Sub-batch OK: {processed}/{} words", rows.len());
+                        }
+                        Err(e2) => {
+                            warn!("  Sub-batch also failed ({} words): {}", sub.len(), e2);
+                            processed += sub.len();
                         }
                     }
                 }
-            }
-            Err(e) => {
-                warn!("LLM batch error ({} words): {}", chunk.len(), e);
+                i = end;
             }
         }
-
-        info!(
-            "Progress: {}/{} words, {} examples inserted",
-            (chunk.as_ptr() as usize - rows.as_ptr() as usize) / std::mem::size_of::<WordEntry>() + chunk.len(),
-            rows.len(),
-            total_inserted
-        );
     }
 
     info!("Done. Total examples inserted: {total_inserted}");
     Ok(())
+}
+
+async fn try_batch(
+    pool: &PgPool,
+    llm: &(impl LlmClient + ?Sized),
+    words: &[WordEntry],
+) -> anyhow::Result<u64> {
+    let prompt = build_batch_prompt(words);
+    let results: Vec<ExampleResult> =
+        crate::llm_client::generate_json(llm, &prompt, LlmTaskType::Generate).await?;
+
+    let mut inserted = 0u64;
+    for r in &results {
+        if r.idx >= words.len() {
+            continue;
+        }
+        let word_id = words[r.idx].id;
+        for ex in &r.examples {
+            let ex = ex.trim();
+            if ex.is_empty() {
+                continue;
+            }
+            let ex_hash = format!("{:x}", md5::compute(ex));
+            match sqlx::query(
+                "INSERT INTO examples (word_id, text, text_hash, source) VALUES ($1, $2, $3, 'llm') ON CONFLICT (word_id, text_hash) DO NOTHING"
+            )
+            .bind(word_id).bind(ex).bind(&ex_hash)
+            .execute(pool).await
+            {
+                Ok(r) => { inserted += r.rows_affected(); }
+                Err(e) => { warn!("Insert error: {e}"); }
+            }
+        }
+    }
+    Ok(inserted)
 }
 
 fn build_batch_prompt(words: &[WordEntry]) -> String {
@@ -100,9 +142,11 @@ fn build_batch_prompt(words: &[WordEntry]) -> String {
     for (i, w) in words.iter().enumerate() {
         body.push_str(&format!(
             "{}. {} ({}) = \"{}\" | {}\n",
-            i, w.word, w.pos,
-            truncate(&w.definition, 150),
-            truncate(&w.translation, 80),
+            i,
+            w.word,
+            w.pos,
+            truncate(&w.definition, 120),
+            truncate(&w.translation, 60),
         ));
     }
 
