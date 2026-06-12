@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+use tokio::time::{sleep, Duration, Instant};
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmTaskType {
@@ -33,6 +36,9 @@ pub struct DeepSeekClient {
     model_generate: String,
     model_evaluate: String,
     timeout_secs: u64,
+    rpm: u32,
+    max_retries: u32,
+    last_request: Mutex<Option<Instant>>,
 }
 
 impl DeepSeekClient {
@@ -42,6 +48,8 @@ impl DeepSeekClient {
         model_generate: String,
         model_evaluate: String,
         timeout_secs: u64,
+        rpm: u32,
+        max_retries: u32,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -50,7 +58,28 @@ impl DeepSeekClient {
             model_generate,
             model_evaluate,
             timeout_secs,
+            rpm,
+            max_retries,
+            last_request: Mutex::new(None),
         }
+    }
+
+    async fn rate_limit(&self) {
+        if self.rpm == 0 { return; }
+        let min_interval_ms = 60_000 / self.rpm as u64 + 10;
+        let wait_ms = {
+            let last = self.last_request.lock().unwrap();
+            let elapsed = last.map(|t| t.elapsed().as_millis() as u64).unwrap_or(min_interval_ms);
+            if elapsed < min_interval_ms {
+                min_interval_ms - elapsed
+            } else {
+                0
+            }
+        };
+        if wait_ms > 0 {
+            sleep(Duration::from_millis(wait_ms)).await;
+        }
+        *self.last_request.lock().unwrap() = Some(Instant::now());
     }
 }
 
@@ -103,32 +132,44 @@ impl LlmClient for DeepSeekClient {
         };
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = self.client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&req)
-            .timeout(std::time::Duration::from_secs(self.timeout_secs))
-            .send()
-            .await?;
 
-        if !resp.status().is_success() {
+        let mut last_error = String::new();
+        for attempt in 0..=self.max_retries {
+            if attempt > 0 {
+                let backoff = 2u64.pow(attempt) * 1000;
+                warn!("LLM retry {} after {}ms", attempt, backoff);
+                sleep(Duration::from_millis(backoff)).await;
+            }
+
+            self.rate_limit().await;
+
+            let resp = self.client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .json(&req)
+                .timeout(Duration::from_secs(self.timeout_secs))
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                let chat_resp: ChatResponse = resp.json().await?;
+                let content = chat_resp.choices
+                    .first()
+                    .map(|c| c.message.content.clone())
+                    .unwrap_or_default();
+                return Ok(content);
+            }
+
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            // Retryable errors
-            if status.as_u16() == 429 || status.is_server_error() {
+            last_error = format!("{status}: {body}");
+
+            if status.as_u16() != 429 && !status.is_server_error() {
                 return Err(anyhow::anyhow!("LLM API error ({status}): {body}"));
             }
-            return Err(anyhow::anyhow!("LLM API error ({status}): {body}"));
         }
 
-        let chat_resp: ChatResponse = resp.json().await?;
-        let content = chat_resp.choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .unwrap_or_default();
-
-        Ok(content)
+        Err(anyhow::anyhow!("LLM API error after {} retries: {last_error}", self.max_retries))
     }
-
 }

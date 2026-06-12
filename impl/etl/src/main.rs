@@ -10,6 +10,10 @@ mod import_wn;
 mod fill_gaps;
 mod evaluate;
 mod quality_report;
+mod generate_examples;
+
+use crate::llm_client::DeepSeekClient;
+use crate::config::EtlConfig;
 
 #[derive(Parser)]
 #[command(name = "dict-etl")]
@@ -41,6 +45,23 @@ enum Commands {
     Evaluate,
     /// Data quality report (no LLM)
     QualityReport,
+    /// Generate examples for tagged words
+    GenExamples {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+}
+
+fn make_llm(cfg: &EtlConfig) -> DeepSeekClient {
+    DeepSeekClient::new(
+        cfg.llm_base_url.clone(),
+        cfg.llm_api_key.clone(),
+        cfg.llm_model_generate.clone(),
+        cfg.llm_model_evaluate.clone(),
+        cfg.llm_timeout_seconds,
+        cfg.llm_rpm,
+        cfg.llm_max_retries,
+    )
 }
 
 #[tokio::main]
@@ -71,27 +92,19 @@ async fn main() -> anyhow::Result<()> {
             import_wn::run(&pool, &cfg.etl_sqlite_wn_path, mode, cfg.etl_batch_size, limit).await?;
         }
         Commands::FillGaps => {
-            let llm = llm_client::DeepSeekClient::new(
-                cfg.llm_base_url.clone(),
-                cfg.llm_api_key.clone(),
-                cfg.llm_model_generate.clone(),
-                cfg.llm_model_evaluate.clone(),
-                cfg.llm_timeout_seconds,
-            );
+            let llm = make_llm(&cfg);
             fill_gaps::run(&pool, &llm).await?;
+        }
+        Commands::Evaluate => {
+            let llm = make_llm(&cfg);
+            evaluate::run(&pool, &llm).await?;
         }
         Commands::QualityReport => {
             quality_report::run(&pool).await?;
         }
-        Commands::Evaluate => {
-            let llm = llm_client::DeepSeekClient::new(
-                cfg.llm_base_url.clone(),
-                cfg.llm_api_key.clone(),
-                cfg.llm_model_generate.clone(),
-                cfg.llm_model_evaluate.clone(),
-                cfg.llm_timeout_seconds,
-            );
-            evaluate::run(&pool, &llm).await?;
+        Commands::GenExamples { limit } => {
+            let llm = make_llm(&cfg);
+            generate_examples::run(&pool, &llm, limit).await?;
         }
     }
 

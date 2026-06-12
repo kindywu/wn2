@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS phrases CASCADE;
+DROP FUNCTION IF EXISTS set_phrases_curated_at() CASCADE;
