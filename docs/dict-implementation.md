@@ -129,8 +129,8 @@
   - 兼容 OpenAI SDK / `reqwest` + JSON 格式，切换成本低。
   - 统一抽象后，未来可无缝替换为 OpenAI / Claude / 本地模型。
 - **当前可用模型名（截至 2025 年）**：
-  - 非思考：`deepseek-chat`（即 DeepSeek-V3，快速、低成本，适合 fill_gaps）
-  - 思考：`deepseek-reasoner`（即 DeepSeek-R1，深度推理，适合 evaluate）
+  - 非思考：`deepseek-v4-flash`（即 DeepSeek-V3，快速、低成本，适合 fill_gaps）
+  - 思考：`deepseek-v4-pro`（即 DeepSeek-R1，深度推理，适合 evaluate）
   - **⚠️ 模型名以 [DeepSeek 官方文档](https://platform.deepseek.com/api-docs/) 为准，文档中所有 `deepseek-v4-flash` / `deepseek-v4-pro` 均为占位名，实际部署前需替换为当时最新的真实模型 ID。**
 
 ---
@@ -494,7 +494,7 @@ sqlx 对 PostgreSQL 特有类型通过 `#[derive(sqlx::Type)]` 直接映射，�
 - [ ] 调用 `llm_client.generate(prompt, task_type).await`
 
 **模型选型**：
-- **fill_gaps 使用非思考模式**（对应 `deepseek-chat` / DeepSeek-V3，或当时最新的快速模型，见 ADR-005 中的模型名说明）。任务为翻译/定义/例句生成，量大且标准，非思考模式速度快、成本低，中英双语表现优秀。
+- **fill_gaps 使用非思考模式**（对应 `deepseek-v4-flash` / DeepSeek-V3，或当时最新的快速模型，见 ADR-005 中的模型名说明）。任务为翻译/定义/例句生成，量大且标准，非思考模式速度快、成本低，中英双语表现优秀。
 
 **技术约束**：
 - **严格幂等**：同一词多次运行不重复生成。查询条件 `WHERE NOT EXISTS (SELECT 1 FROM translations t WHERE t.word_id = w.id AND t.source = 'llm')`。
@@ -508,7 +508,7 @@ sqlx 对 PostgreSQL 特有类型通过 `#[derive(sqlx::Type)]` 直接映射，�
 - [ ] `score < 4` 写入 `evaluations`
 
 **模型选型**：
-- **evaluate 使用思考模式**（对应 `deepseek-reasoner` / DeepSeek-R1，见 ADR-005 中的模型名说明）。
+- **evaluate 使用思考模式**（对应 `deepseek-v4-pro` / DeepSeek-R1，见 ADR-005 中的模型名说明）。
 - 评价任务需要批判性推理（尤其是跨源一致性检查），思考模式推理深度更可靠。
 - 评价量远小于生成量，成本可控。
 
@@ -670,8 +670,8 @@ sqlx 对 PostgreSQL 特有类型通过 `#[derive(sqlx::Type)]` 直接映射，�
 - [ ] 配置项（`.env`）：
   - `LLM_PROVIDER=deepseek`
   - `LLM_API_KEY=sk-...`
-  - `LLM_MODEL_GENERATE=deepseek-chat`（非思考模型，对应 fill_gaps；以官方文档为准）
-  - `LLM_MODEL_EVALUATE=deepseek-reasoner`（思考模型，对应 evaluate；以官方文档为准）
+  - `LLM_MODEL_GENERATE=deepseek-v4-flash`（非思考模型，对应 fill_gaps；以官方文档为准）
+  - `LLM_MODEL_EVALUATE=deepseek-v4-pro`（思考模型，对应 evaluate；以官方文档为准）
   - `LLM_RPM=60`
   - `LLM_MAX_RETRIES=3`
   - `LLM_TIMEOUT_SECONDS=60`
@@ -937,10 +937,10 @@ API_BEARER_TOKEN=changeme_in_production
 LLM_PROVIDER=deepseek
 LLM_BASE_URL=https://api.deepseek.com
 LLM_API_KEY=sk-...
-# fill_gaps 用非思考模式（快速、低成本）；当前对应 deepseek-chat，以官方文档为准
-LLM_MODEL_GENERATE=deepseek-chat
-# evaluate 用思考模式（批判性推理）；当前对应 deepseek-reasoner，以官方文档为准
-LLM_MODEL_EVALUATE=deepseek-reasoner
+# fill_gaps 用非思考模式（快速、低成本）；当前对应 deepseek-v4-flash，以官方文档为准
+LLM_MODEL_GENERATE=deepseek-v4-flash
+# evaluate 用思考模式（批判性推理）；当前对应 deepseek-v4-pro，以官方文档为准
+LLM_MODEL_EVALUATE=deepseek-v4-pro
 LLM_RPM=60
 LLM_MAX_RETRIES=3
 LLM_TIMEOUT_SECONDS=60

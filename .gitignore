@@ -19,3 +19,8 @@ CLAUDE.md
 
 # Secrets
 .env
+
+
+# impl
+impl/target/
+impl/frontend/node_modules/
