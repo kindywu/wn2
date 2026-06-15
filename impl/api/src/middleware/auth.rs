@@ -5,6 +5,7 @@ use axum::{
     response::Response,
 };
 
+#[allow(dead_code)]
 pub async fn auth_middleware(req: Request, next: Next) -> Result<Response, StatusCode> {
     let auth_header = req
         .headers()

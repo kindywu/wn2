@@ -38,6 +38,7 @@ pub fn normalize_pos(raw: &str) -> Option<PosType> {
 }
 
 /// Field priority: higher number = higher priority
+#[allow(dead_code)]
 pub fn field_priority_for_source(field: &str, source: DataSource) -> i32 {
     match (field, source) {
         // wn > stardict for these

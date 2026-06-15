@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct WordSearchQuery {
     pub q: String,
+    #[allow(dead_code)]
     pub pos: Option<String>,
     pub mode: Option<String>,  // "exact" (default) or "prefix"
     pub limit: Option<i64>,
@@ -169,6 +170,7 @@ pub struct PendingChangeOut {
 #[derive(Debug, Deserialize)]
 pub struct PendingChangeQuery {
     pub status: Option<String>,
+    #[allow(dead_code)]
     pub source: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -236,6 +238,7 @@ pub struct ChangeLogOut {
 #[derive(Debug, Deserialize)]
 pub struct ChangeLogQuery {
     pub operator: Option<String>,
+    #[allow(dead_code)]
     pub from: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,

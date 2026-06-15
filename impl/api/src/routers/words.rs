@@ -1,5 +1,4 @@
-use axum::{extract::{Path, Query, State}, http::StatusCode, Json, Extension};
-use sqlx::PgPool;
+use axum::{extract::{Path, Query, State}, Json};
 
 use crate::error::{AppError, AppResult, api_response, api_list_response};
 use crate::middleware::auth::Operator;

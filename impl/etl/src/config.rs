@@ -11,6 +11,7 @@ pub struct EtlConfig {
     #[serde(default = "default_wn_path")]
     pub etl_sqlite_wn_path: String,
     #[serde(default = "default_llm_provider")]
+    #[allow(dead_code)]
     pub llm_provider: String,
     #[serde(default = "default_llm_base_url")]
     pub llm_base_url: String,
